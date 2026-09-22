@@ -468,3 +468,41 @@ uses its own manifest `/Users/anthbel/projects/wb/cameroun/openimis-forks.json` 
 manifest + `{"name": "biometric", "pip": "-e <repo>"}` (and `biometric_pgvector` for the
 pgvector run), passed via `OPENIMIS_CONF`. The test env always includes
 `MODE=dev DJANGO_SETTINGS_MODULE=openIMIS.settings`.
+
+### 6.6 Test environments (as built and verified)
+
+Common test env for every run below, from `openimis-be_py/openIMIS`:
+`MODE=dev DJANGO_SETTINGS_MODULE=openIMIS.settings DB_DEFAULT=postgresql DB_HOST=localhost
+DB_USER=openimisuser DB_PASSWORD=change-me SITE_ROOT=api ASYNC=SYNC
+CELERY_TASK_ALWAYS_EAGER=True CELERY_BROKER_URL=memory:// SCHEDULER_AUTOSTART=`, then
+`<venv>/bin/pytest <paths> --reuse-db`. The test database name resolves to `test_imis`
+whatever `DB_NAME` says (`openIMIS/settings/database.py` defaults `DB_TEST_NAME` that way).
+
+| Run | Port / container | Manifest | Venv | Result |
+|---|---|---|---|---|
+| `biometric`, `deduplication` | 55432 / `openimis-dist-cameroun-postgres-1` (PG 13) | `openimis-forks.json` | `.venv-cameroun` | biometric 106 + 1 skip; dedup 30 |
+| `biometric_pgvector`, `biometric` | 55434 / `biometric-pgvector-test` (`pgvector/pgvector:pg13`) | `openimis-forks-pgvector.json` | `.venv-cameroun` + `pgvector` | 20; 106 + 1 skip |
+| `biometric_verification` (health) | 55435 / `biometric-health-db` (`openimis-pgsql:25.10`) | `openimis-health.json` | `.venv-health` | 47 |
+
+Port 55433 belongs to an unrelated project's database; never use it.
+
+**pgvector test DB.** The throwaway image has no openIMIS schema, so it is cloned read-only
+from the dev DB: create `test_imis` on 55434; `pg_dump --schema-only --no-owner
+--no-privileges` of 55432/`openimis` piped through `grep -v postgres-json-schema` (an
+extension the pgvector image lacks, unused) into it; `pg_dump --data-only` of the six
+bootstrap tables `setup_test_db.sh` copies; run `drop_orphan_fks.py`; then
+`manage.py migrate biometric_pgvector` (creates the `vector` extension and the side table).
+
+**Health venv and DB.** Modules at `release/26.04`: core, location, medical,
+medical_pricelist, product, payer, insuree, calculation, contribution_plan, policy,
+contribution, invoice, claim_batch, claim, report — the smallest set for which `insuree` and
+`claim` migrate and `manage.py check` passes (`policy` imports `contribution_plan`, whose
+migrations depend on `calculation`; `claim_batch` imports `contribution` and `invoice`;
+`claim.views` imports `report`; every manifest entry's `urls` is included, so `check`
+walks them all) — plus `biometric` and `biometric_verification` (`-e` this repo).
+Build: `python3.11 -m venv .venv-health`; `pip install -r openimis-be_py/requirements.txt
+-c openimis-dist-cameroun/constraints.txt`; each module cloned `--depth 1 -b release/26.04`
+with retries and installed `-e` with `--retries 10 --timeout 60`; `pytest==9.0.3
+pytest-django==4.12.0`. DB: `manage.py migrate` (`NO_DATABASE=True`), `manage.py check`,
+`openimis-dist-cameroun/scripts/setup_test_db.sh` with `DB_PORT=55435
+DB_NAME=openimis_health`, then `drop_orphan_fks.py` against `test_imis`.
