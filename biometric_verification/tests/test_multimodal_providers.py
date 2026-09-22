@@ -7,6 +7,7 @@ providers used everywhere else in this test suite.
 
 from django.test import SimpleTestCase
 
+from biometric_verification.apps import BiometricVerificationConfig
 from biometric_verification.providers.base import (
     EmbeddingProvider,
     Extracted,
@@ -55,11 +56,24 @@ class TestModalityProviderABC(SimpleTestCase):
 class TestDeepFaceProviderEmbeddingInterface(SimpleTestCase):
     """Covers the new EmbeddingProvider surface without importing deepface."""
 
+    def setUp(self):
+        self._legacy_threshold = BiometricVerificationConfig.similarity_threshold
+
+    def tearDown(self):
+        BiometricVerificationConfig.similarity_threshold = self._legacy_threshold
+
     def test_identity(self):
         provider = DeepFaceProvider()
         self.assertEqual(provider.modality, "face")
         self.assertEqual(provider.kind, "embedding")
-        self.assertEqual(provider.default_threshold, 0.68)
+
+    def test_default_threshold_derives_from_legacy_distance_threshold(self):
+        BiometricVerificationConfig.similarity_threshold = 0.68
+        provider = DeepFaceProvider()
+        self.assertAlmostEqual(provider.default_threshold, 0.32, places=6)
+
+        BiometricVerificationConfig.similarity_threshold = 0.75
+        self.assertAlmostEqual(provider.default_threshold, 0.25, places=6)
 
     def test_distance_matches_legacy_cosine_distance(self):
         provider = DeepFaceProvider()

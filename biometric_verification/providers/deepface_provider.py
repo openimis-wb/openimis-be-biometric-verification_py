@@ -69,10 +69,23 @@ class DeepFaceProvider(BaseBiometricProvider, EmbeddingProvider):
 
     provider_name = "deepface"
 
-    # ModalityProvider identity — similarity scale, distinct from the legacy
-    # distance-threshold semantics of BIOMETRIC_VERIFICATION["SIMILARITY_THRESHOLD"].
+    # ModalityProvider identity.
     modality = "face"
-    default_threshold = 0.68
+
+    @property
+    def default_threshold(self) -> float:
+        """
+        Similarity floor derived from the legacy distance threshold, so both
+        paths accept the same pairs at the same configured number: legacy
+        verify_from_embedding accepts when distance <= similarity_threshold;
+        this path accepts when similarity (1 - distance) >= 1 - similarity_threshold.
+        """
+        from biometric_verification.apps import BiometricVerificationConfig
+
+        legacy_distance_threshold = BiometricVerificationConfig.similarity_threshold
+        if legacy_distance_threshold is None:
+            legacy_distance_threshold = 0.68
+        return 1.0 - legacy_distance_threshold
 
     def __init__(
         self,

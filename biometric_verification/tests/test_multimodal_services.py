@@ -4,6 +4,7 @@ providers registered per test — no ML model is ever loaded.
 """
 
 from datetime import timedelta
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from django.db import IntegrityError, transaction
@@ -20,6 +21,7 @@ from biometric_verification.models import (
     BiometricVerification,
 )
 from biometric_verification.providers.base import Extracted
+from biometric_verification.providers.deepface_provider import DeepFaceProvider
 from biometric_verification.providers.device_reported import DeviceReportedMatcher
 from biometric_verification.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
 from biometric_verification.registry import ProviderRegistry
@@ -183,6 +185,64 @@ class TestVerify(_MultimodalServiceTestCase):
         # Probing with photo-a's exact bytes: the "left" template should win with score 1.0.
         result = verify(SUBJECT_MODEL, "s1", "face", sample=b"photo-a", actor="tester")
         self.assertAlmostEqual(result.confidence, 1.0, places=5)
+
+
+class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
+    """
+    Regression test for the threshold-scale bug: legacy verify_from_embedding
+    (distance <= similarity_threshold) and the new verify() (similarity >=
+    modality threshold) must reach the same verdict for the same pair, at the
+    default config, on the real DeepFaceProvider. Only get_embedding() is
+    stubbed (no deepface package is installed in this environment) — the
+    threshold/decision logic in both paths runs for real.
+    """
+
+    # 60 degrees apart, both unit vectors: cosine distance = 0.5, similarity = 0.5.
+    # Legacy: 0.5 <= 0.68 -> verified. Pre-fix new path: 0.5 >= 0.68 -> NOT verified
+    # (the bug). Fixed new path: 0.5 >= 0.32 -> verified (matches legacy).
+    PROBE_VECTOR = [1.0, 0.0]
+    REFERENCE_VECTOR = [0.5, 0.8660254037844387]
+
+    def setUp(self):
+        self._legacy_threshold = BiometricVerificationConfig.similarity_threshold
+        self._modalities = BiometricVerificationConfig.modalities
+        self._registry_snapshot = dict(ProviderRegistry._modality_registry)
+        self._instances_snapshot = dict(ProviderRegistry._modality_instances)
+
+        BiometricVerificationConfig.similarity_threshold = 0.68
+        BiometricVerificationConfig.modalities = {"face": {"provider": "deepface", "threshold": 0.32}}
+        ProviderRegistry._modality_instances.clear()
+        ProviderRegistry.register_modality("face", "deepface", DeepFaceProvider)
+
+        self._get_embedding_patch = patch.object(
+            DeepFaceProvider, "get_embedding", return_value=self.PROBE_VECTOR,
+        )
+        self._get_embedding_patch.start()
+
+    def tearDown(self):
+        self._get_embedding_patch.stop()
+        BiometricVerificationConfig.similarity_threshold = self._legacy_threshold
+        BiometricVerificationConfig.modalities = self._modalities
+        ProviderRegistry._modality_registry.clear()
+        ProviderRegistry._modality_registry.update(self._registry_snapshot)
+        ProviderRegistry._modality_instances.clear()
+        ProviderRegistry._modality_instances.update(self._instances_snapshot)
+
+    def test_same_verdict_at_default_thresholds(self):
+        legacy_provider = DeepFaceProvider()
+        legacy_result = legacy_provider.verify_from_embedding(
+            probe_image=b"unused-because-get_embedding-is-stubbed",
+            reference_embedding=self.REFERENCE_VECTOR,
+        )
+
+        BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id="s1", modality="face", kind="embedding",
+            vector=self.REFERENCE_VECTOR, provider="deepface", model_name=legacy_provider.model_name,
+        )
+        new_result = verify(SUBJECT_MODEL, "s1", "face", sample=b"unused", actor="tester")
+
+        self.assertTrue(legacy_result.verified, "legacy path should verify this pair")
+        self.assertEqual(legacy_result.verified, new_result.verified)
 
 
 class TestIdentify(_MultimodalServiceTestCase):

@@ -21,13 +21,17 @@ DEFAULT_CFG = {
     # --- Multimodal identity + deduplication seam (docs/wb-biometric-dedup-seam.md §3.2) ---
     "subject_model": "individual.Individual",
     "modalities": {
-        "face": {"provider": "deepface", "threshold": 0.68},        # legacy default kept
+        # 0.32 is 1.0 - similarity_threshold (0.68): the legacy insuree flow's
+        # 0.68 is a cosine DISTANCE cutoff (verified when distance <= 0.68);
+        # this new path scores SIMILARITY (verified when similarity >= threshold),
+        # so the same operating point is 1.0 - 0.68 = 0.32 here.
+        "face": {"provider": "deepface", "threshold": 0.32},
         "fingerprint": {"provider": "device_reported", "threshold": 48},
     },
     "vector_index": "numpy",  # "numpy" | "pgvector" (pgvector only if importable)
     "template_key": None,     # Fernet key; templates/vectors encrypted at rest when set
     "require_consent": False,
-    "dedup_threshold": {"face": 0.62},  # similarity at/above which a candidate is emitted
+    "dedup_threshold": {"face": 0.62},  # similarity (not distance) at/above which a candidate is emitted
     "fusion": {
         "weights": {"face": 1.0},
         "thresholds": {"accept": 0.7, "review": 0.6},
@@ -102,7 +106,8 @@ class BiometricVerificationConfig(AppConfig):
     # Multimodal identity + deduplication seam
     subject_model = "individual.Individual"
     modalities = {
-        "face": {"provider": "deepface", "threshold": 0.68},
+        # See DEFAULT_CFG above: 0.32 = 1.0 - similarity_threshold (a distance cutoff).
+        "face": {"provider": "deepface", "threshold": 0.32},
         "fingerprint": {"provider": "device_reported", "threshold": 48},
     }
     vector_index = "numpy"
