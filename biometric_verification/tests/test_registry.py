@@ -82,7 +82,7 @@ class TestProviderRegistry(SimpleTestCase):
 
     # --- get_active_provider() ---
 
-    @patch("biometric_verification.registry.BiometricVerificationConfig")
+    @patch("biometric_verification.apps.BiometricVerificationConfig")
     def test_returns_correct_provider_instance(self, mock_cfg):
         mock_cfg.provider = "alpha"
         mock_cfg.provider_config = {}
@@ -92,7 +92,7 @@ class TestProviderRegistry(SimpleTestCase):
 
         self.assertIsInstance(provider, _AlphaProvider)
 
-    @patch("biometric_verification.registry.BiometricVerificationConfig")
+    @patch("biometric_verification.apps.BiometricVerificationConfig")
     def test_instance_is_cached(self, mock_cfg):
         mock_cfg.provider = "alpha"
         mock_cfg.provider_config = {}
@@ -103,7 +103,7 @@ class TestProviderRegistry(SimpleTestCase):
 
         self.assertIs(p1, p2)
 
-    @patch("biometric_verification.registry.BiometricVerificationConfig")
+    @patch("biometric_verification.apps.BiometricVerificationConfig")
     def test_provider_config_passed_as_kwargs(self, mock_cfg):
         mock_cfg.provider = "beta"
         mock_cfg.provider_config = {"model_name": "CustomNet"}
@@ -113,7 +113,7 @@ class TestProviderRegistry(SimpleTestCase):
 
         self.assertEqual(provider.model_name, "CustomNet")
 
-    @patch("biometric_verification.registry.BiometricVerificationConfig")
+    @patch("biometric_verification.apps.BiometricVerificationConfig")
     def test_unknown_provider_raises_key_error(self, mock_cfg):
         mock_cfg.provider = "nonexistent"
         mock_cfg.provider_config = {}

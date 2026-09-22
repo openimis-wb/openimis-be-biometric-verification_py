@@ -104,7 +104,7 @@ class TestVerifyFromEmbedding(SimpleTestCase):
         return _StubProvider(embedding=probe_embedding)
 
     @patch(
-        "biometric_verification.providers.base.BiometricVerificationConfig"
+        "biometric_verification.apps.BiometricVerificationConfig"
     )
     def test_identical_embeddings_verified(self, mock_cfg):
         mock_cfg.similarity_threshold = 0.68  # distance threshold = 1 - 0.68 = 0.32
@@ -119,7 +119,7 @@ class TestVerifyFromEmbedding(SimpleTestCase):
         self.assertEqual(result.provider, "stub")
 
     @patch(
-        "biometric_verification.providers.base.BiometricVerificationConfig"
+        "biometric_verification.apps.BiometricVerificationConfig"
     )
     def test_orthogonal_embeddings_not_verified(self, mock_cfg):
         mock_cfg.similarity_threshold = 0.68  # threshold = 0.32; distance = 1.0 > 0.32
@@ -132,7 +132,7 @@ class TestVerifyFromEmbedding(SimpleTestCase):
         self.assertAlmostEqual(result.distance, 1.0, places=5)
 
     @patch(
-        "biometric_verification.providers.base.BiometricVerificationConfig"
+        "biometric_verification.apps.BiometricVerificationConfig"
     )
     def test_explicit_threshold_override(self, mock_cfg):
         mock_cfg.similarity_threshold = 0.68
