@@ -369,3 +369,102 @@ The database is the `cameroun-db` container (`make db-up` in `openimis-dist-came
 Docker Desktop must be running). New tables need the migrations applied once to the test DB:
 run `<workspace>/.venv-cameroun/bin/python manage.py migrate <app>` from `openimis-be_py/openIMIS`
 with the same environment, or drop `--no-migrations` for the first run.
+
+## 6. Revision 2 — gaps closed
+
+This section supersedes earlier sections where they conflict.
+
+### 6.1 Generic app `biometric`; `biometric_verification` returns to upstream
+
+The generic multimodal code moves to a **new Django app `biometric`** (package `biometric/`,
+app label `biometric`) in the same repository and distribution. `biometric_verification`
+goes back to the exact bytes of `upstream/develop` for every non-test file: its models,
+its migrations 0001–0004 (unconditional again), providers, registry, services, schema,
+consumers, routing. It is the health-domain app, bound to `insuree`/`claim`, installed
+only by assemblies that have them. No conditional migration anywhere.
+
+- Everything §3 specified lives in `biometric/`: `providers/` (ModalityProvider,
+  EmbeddingProvider, MatcherProvider, DeepFace face provider, DeviceReportedMatcher, fakes),
+  `registry.py` (per-modality registry only), `crypto.py`, `models.py` (the six tables,
+  same `db_table` names), `services.py`, `dedup_source.py`, `signals.py`, `schema.py`
+  (the six GraphQL fields, rights 174001–174004), `management/commands/biometric_purge.py`,
+  `apps.py` (`BiometricConfig`, config key `BIOMETRIC`).
+- `biometric` never imports `biometric_verification`. `biometric_verification` may later
+  delegate to `biometric`; not in this revision.
+- The face provider in `biometric` is its own `EmbeddingProvider` on the **similarity**
+  scale; its threshold is configured as a similarity (`MODALITIES["face"]["threshold"]`,
+  default 0.32 = legacy distance 0.68). Keep the agreement test against the legacy
+  `biometric_verification` provider only where that app is installed (health env, 6.4).
+- Migrations: `biometric/migrations/0001_initial.py` creates the six tables fresh.
+- `setup.py`: `packages=find_packages()` already covers both; add
+  `extras_require={"pgvector": ["pgvector>=0.3"]}`.
+
+### 6.2 Optional app `biometric_pgvector`
+
+Separate app (package `biometric_pgvector/`, label `biometric_pgvector`), installed only
+where the Postgres server has the `vector` extension.
+
+- Model `BiometricVectorIndex` (`db_table="biometric_vector_index"`): `template` OneToOne to
+  `biometric.BiometricTemplate` (CASCADE, pk), `modality`, `provider`, `model_name`,
+  `dim` int, `embedding` = `pgvector.django.VectorField()` without fixed dimensions.
+  Migration 0001 runs `pgvector.django.VectorExtension()` then creates the table.
+- Kept in sync by signal receivers on `BiometricTemplate` (post_save / post_delete): an active
+  embedding-kind row gets its side row upserted from the decrypted vector; a superseded or
+  deleted row loses it. Management command `biometric_vector_reindex` backfills.
+- Per-model HNSW index, dimension-specific, created by management command
+  `biometric_vector_index --model NAME --dim N [--drop]`:
+  `CREATE INDEX IF NOT EXISTS <name> ON biometric_vector_index USING hnsw
+  ((embedding::vector(N)) vector_cosine_ops) WHERE model_name = 'NAME'`.
+- `biometric.services.identify` with `VECTOR_INDEX="pgvector"`: raise
+  `ImproperlyConfigured` unless `biometric_pgvector` is installed; otherwise query the side
+  table with the same cast expression (`ORDER BY (embedding::vector(N)) <=> %s::vector(N)
+  LIMIT k`), inside a transaction that sets `SET LOCAL hnsw.ef_search = <config, default
+  200>`, applying the `scope` filter through the template join and `exclude_subject`.
+  Returns the same `Match` objects as the NumPy path, similarity = 1 − cosine distance.
+- Plaintext: the index stores vectors in clear — an ANN index cannot search encrypted
+  vectors. When `TEMPLATE_KEY` is set, `biometric_pgvector` refuses to start
+  (`ImproperlyConfigured`) unless `BIOMETRIC["ALLOW_PLAINTEXT_INDEX"]` is `True`. README
+  states this trade-off plainly.
+- Tests run against a vector-capable Postgres: container `pgvector/pgvector:pg13` on
+  port 55433 (same major as dev), test DB prepared exactly like `test_imis`
+  (`openimis-dist-cameroun/scripts/setup_test_db.sh` with the port/name overridden).
+  Required cases: side row sync (create, supersede, delete, consolidate), reindex,
+  index command creates the named index, `identify` pgvector path returns the same top-k
+  as the NumPy path on the same gallery, scope and self-exclusion, plaintext guard.
+
+### 6.3 Behaviour options
+
+- Purge: `BiometricRetentionPolicy` gains `active_template_retention_days` (null) and
+  `purge_active_enabled` (bool, default False). When both are set, **active** templates whose
+  `validity_from` is older than the window are erased too (after superseded ones), each
+  subject getting a tombstone with `reason="ACTIVE_AGE"`. Check constraint: enabled requires
+  the window. Default behaviour unchanged.
+- `subject_model`: every service and GraphQL argument `subject_model` becomes optional and
+  defaults to `BIOMETRIC["SUBJECT_MODEL"]` (`"individual.Individual"`).
+- Deduplication `IdentifierSource`: config `DEDUPLICATION["IDENTIFIER_MATCH"]` =
+  `"each"` (default, current behaviour: any single key matching) or `"all"` (compound: all
+  configured keys equal and non-empty). Tests for both.
+
+### 6.4 Legacy tests of `biometric_verification`
+
+Fix the 23 upstream tests that fail on `upstream/develop`; never weaken an assertion.
+- Tests patching an attribute where it is not looked up: patch where it is looked up
+  (e.g. `biometric_verification.apps.BiometricVerificationConfig.<attr>` via
+  `patch.object`, or the lazily imported module path).
+- `VerifyFaceMutation` tests: call with the mutation's real argument names (`uuid`,
+  `frame`) — the GraphQL API is the contract; the tests follow it.
+- Tests needing `insuree`/`claim`: run in a **health test environment** — a separate venv
+  `/Users/anthbel/projects/wb/cameroun/.venv-health` and manifest
+  `/Users/anthbel/projects/wb/cameroun/openimis-health.json` holding the smallest
+  import-closed set of upstream modules (`release/26.04`) that makes `insuree` and `claim`
+  install and migrate, plus `biometric_verification` (-e). Record the exact set and the
+  run command in §5.
+
+### 6.5 Local manifests
+
+The shared `openimis-be_py/openimis.json` goes back to the synced state (no
+`biometric_verification` line) so `make check-manifests` / `make test-be` pass. Fork testing
+uses its own manifest `/Users/anthbel/projects/wb/cameroun/openimis-forks.json` = the synced
+manifest + `{"name": "biometric", "pip": "-e <repo>"}` (and `biometric_pgvector` for the
+pgvector run), passed via `OPENIMIS_CONF`. The test env always includes
+`MODE=dev DJANGO_SETTINGS_MODULE=openIMIS.settings`.
