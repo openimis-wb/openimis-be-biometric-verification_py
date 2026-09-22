@@ -2,7 +2,7 @@ import io
 import logging
 from typing import Optional
 
-from .base import BaseBiometricProvider, VerificationResult
+from .base import BaseBiometricProvider, EmbeddingProvider, Extracted, VerificationResult, _cosine_distance
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _DEFAULT_MODEL = "ArcFace"
 _DEFAULT_DETECTOR = "retinaface"  # Changed from opencv - more accurate face detection
 
 
-class DeepFaceProvider(BaseBiometricProvider):
+class DeepFaceProvider(BaseBiometricProvider, EmbeddingProvider):
     """
     Local face verification using the DeepFace library.
 
@@ -68,6 +68,11 @@ class DeepFaceProvider(BaseBiometricProvider):
     """
 
     provider_name = "deepface"
+
+    # ModalityProvider identity — similarity scale, distinct from the legacy
+    # distance-threshold semantics of BIOMETRIC_VERIFICATION["SIMILARITY_THRESHOLD"].
+    modality = "face"
+    default_threshold = 0.68
 
     def __init__(
         self,
@@ -267,6 +272,18 @@ class DeepFaceProvider(BaseBiometricProvider):
     def health_check(self) -> bool:
         """Return True if deepface is importable."""
         return _DEEPFACE_AVAILABLE
+
+    # ------------------------------------------------------------------
+    # EmbeddingProvider (ModalityProvider) implementation
+    # ------------------------------------------------------------------
+
+    def extract(self, sample: bytes, position: Optional[str] = None) -> Extracted:
+        """Face has no position — wraps get_embedding()."""
+        return Extracted(vector=self.get_embedding(sample))
+
+    def distance(self, a: list, b: list) -> float:
+        """Same cosine distance used by the legacy verify_from_embedding() path."""
+        return _cosine_distance(a, b)
 
     # ------------------------------------------------------------------
     # Internal helpers
