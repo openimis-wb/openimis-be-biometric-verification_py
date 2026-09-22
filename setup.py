@@ -42,6 +42,11 @@ setup(
             'azure-cognitiveservices-vision-face',
             'msrest',
         ],
+        # pgvector ANN index — pip install "openimis-be-biometric_verification[pgvector]"
+        # Used by the optional biometric_pgvector app, not by biometric itself.
+        'pgvector': [
+            'pgvector>=0.3',
+        ],
     },
     classifiers=[
         'Environment :: Web Environment',

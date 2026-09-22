@@ -8,26 +8,17 @@ from django.db import migrations, models
 import django.db.models.deletion
 import simple_history.models
 
-from biometric_verification.legacy import HAS_CLAIM
-
 
 class Migration(migrations.Migration):
 
     dependencies = [
+        ('claim', '0036_alter_claim_admin_delete_claimadmin'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ('medical', '0010_rename_servicelinkeditem_serviceitem_parent_and_more'),
         ('biometric_verification', '0001_initial'),
-    ] + (
-        # No-op when claim isn't installed (e.g. social protection assembly):
-        # ClaimFacialAudit and its FKs are health-assembly-only.
-        [
-            ('claim', '0036_alter_claim_admin_delete_claimadmin'),
-            ('medical', '0010_rename_servicelinkeditem_serviceitem_parent_and_more'),
-        ]
-        if HAS_CLAIM
-        else []
-    )
+    ]
 
-    operations = [] if not HAS_CLAIM else [
+    operations = [
         migrations.CreateModel(
             name='HistoricalClaimFacialAudit',
             fields=[

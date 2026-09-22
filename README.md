@@ -1,22 +1,163 @@
 # openimis-be-biometric_verification
 
-Biometric identity verification module for [openIMIS](https://openimis.org). Verifies an insuree's identity at point of service by comparing a live webcam capture against the reference photo stored at enrollment.
+This distribution ships **two independent Django apps**:
 
-Built with a **provider pattern** — DeepFace is the default local engine, but any external licensed API can be swapped in via configuration.
+| App | Assembly | Subject | What it does |
+|---|---|---|---|
+| `biometric` | Any (social protection, generic) | `(subject_model, subject_id)`, e.g. `"individual.Individual"` | Multimodal identity: enrol/verify/identify across face, fingerprint, voice, iris, palmvein; deduplication candidate source |
+| `biometric_verification` | Health only | `insuree.Insuree` / `claim.Claim` | Legacy 1:1 face verification at point of service, claim facial-audit trail |
+
+They do not import each other. An assembly installs the app(s) matching what
+it has: `biometric` needs nothing beyond `openimis-be-core`; `biometric_verification`
+needs `insuree` and `claim` installed (its models FK to them unconditionally).
+A health assembly with both social-protection and health features can install
+both apps side by side.
 
 ---
 
-## Features
+## `biometric` — multimodal identity + deduplication
 
-- 1:1 face verification (probe vs. stored reference photo)
-- Pre-computed embedding storage for fast point-of-service verification
-- Pluggable provider architecture: local (DeepFace) or external (AWS, Azure, custom licensed SDK)
-- GraphQL API — no new REST endpoints, integrates with existing openIMIS stack
-- Configurable model and threshold per deployment context
+Built with a **provider pattern**: DeepFace is the default local face engine,
+device-reported matching covers modalities matched on a tablet SDK
+(fingerprint), and any other modality plugs in via `ModalityProvider`.
+
+### Features
+
+- Enrol/verify/identify across any modality, addressed by
+  `(subject_model, subject_id)` — no FK, no contenttypes dependency
+- Embedding (vector, cosine similarity) and template (opaque bytes, vendor
+  matcher) providers, both on the same similarity scale (higher = more similar)
+- Server-side verification (extract + compare) or device-reported verification
+  (a tablet reports its own score, checked against the configured threshold)
+- Multimodal fusion (`fuse()`) — weighted, tighten-only accept/review/reject
+- Deduplication candidate source, registered with `deduplication.sources`
+  when that module is installed
+- At-rest encryption of vectors/templates (Fernet) when `TEMPLATE_KEY` is set
+- Retention/purge, with an audit trail (`BiometricAccessLog`) and tombstones
+  (`BiometricErasure`) on erasure
+
+### Quick start
+
+```bash
+pip install openimis-be-biometric_verification
+```
+
+Add to `openimis.json`:
+```json
+{
+  "modules": ["biometric"]
+}
+```
+
+Run migrations:
+```bash
+python manage.py migrate biometric
+```
+
+### Configuration
+
+`BIOMETRIC` (or the `biometric` `ModuleConfiguration` row):
+
+```python
+BIOMETRIC = {
+    "SUBJECT_MODEL": "individual.Individual",
+    "MODALITIES": {
+        "face":        {"provider": "deepface",        "threshold": 0.32},
+        "fingerprint": {"provider": "device_reported",  "threshold": 48},
+    },
+    "VECTOR_INDEX": "numpy",   # "numpy" (always available) | "pgvector" (requires the biometric_pgvector app)
+    "TEMPLATE_KEY": None,      # Fernet key (cryptography.fernet); templates/vectors encrypted at rest when set
+    "REQUIRE_CONSENT": False,
+    "DEDUP_THRESHOLD": {"face": 0.62},   # similarity at/above which a dedup candidate is emitted
+    "FUSION": {
+        "weights": {"face": 1.0},
+        "thresholds": {"accept": 0.7, "review": 0.6},
+        "floors": {},
+        "floor_decision": "review",
+    },
+    "GQL_BIOMETRIC_ENROL_PERMS": ["174001"],
+    "GQL_BIOMETRIC_VERIFY_PERMS": ["174002"],
+    "GQL_BIOMETRIC_IDENTIFY_PERMS": ["174003"],
+    "GQL_BIOMETRIC_READ_PERMS": ["174004"],
+}
+```
+
+`face`'s default threshold (0.32) is on the similarity scale (1.0 = identical,
+0.0 = orthogonal) — not the legacy `biometric_verification` distance scale.
+
+### Providers
+
+- `providers.base.ModalityProvider` — common base (`modality`, `provider_name`,
+  `kind`, `default_threshold`, `extract()`); `EmbeddingProvider` adds
+  `distance()`/`similarity()`, `MatcherProvider` adds `match()`.
+- `providers.deepface_provider.DeepFaceProvider` — `EmbeddingProvider` for
+  `modality="face"` (registered under `("face", "deepface")`), similarity scale,
+  default threshold 0.32.
+- `providers.device_reported.DeviceReportedMatcher` — stores a device-supplied
+  template as given; matching happens on the device, not the server. Registered
+  for every documented modality out of the box.
+- `providers.fake.FakeEmbeddingProvider` / `FakeMatcherProvider` — deterministic,
+  test-only providers (no ML model loaded).
+
+Register a custom one with `ProviderRegistry.register_modality(modality, name,
+provider_class)`; resolve the one configured for a modality with
+`ProviderRegistry.get_provider(modality)`.
+
+### Services (`biometric.services`)
+
+- `enrol(subject_model=None, subject_id, modality, sample, *, position=None, actor, metadata=None, device_template=None)`
+  — extracts (or accepts a device template for) one sample, superseding any
+  previous active row on the same key. Refused when `REQUIRE_CONSENT` and no
+  `BiometricConsent` was granted. `subject_model` defaults to
+  `BIOMETRIC["SUBJECT_MODEL"]`.
+- `verify(subject_model=None, subject_id, modality, *, sample=None, device_score=None, ..., actor)`
+  — server path (extract + compare) or device path (`device_score` checked
+  against the modality threshold). Always writes a `BiometricVerification` row.
+- `identify(modality, *, sample=None, vector=None, template=None, top_k=5, scope=None, exclude_subject=None)`
+  — ranks the gallery for one modality/provider/model. NumPy cosine path always
+  available; `VECTOR_INDEX="pgvector"` requires the `biometric_pgvector` app
+  (`ImproperlyConfigured` otherwise).
+- `fuse(scores, *, weights=None, thresholds=None, floors=None, floor_decision=None, required=frozenset())`
+  — multimodal decision (`accept`/`review`/`reject`), tighten-only.
+- `consolidate(subject_model=None, kept_id, retired_id, *, actor)` — re-points
+  `retired`'s active templates to `kept` (or supersedes on key collision).
+  Bound to the `deduplication.subject_merged` service signal.
+- `templates_of(subject_model=None, subject_id, *, modality=None, actor, purpose="read")`
+  — the only sanctioned plaintext read path; decrypts and logs the access.
+- `purge(now=None, *, actor="retention")` — two independent, off-by-default
+  passes: superseded templates past `template_retention_days` (when
+  `purge_enabled`), then still-active templates past
+  `active_template_retention_days` (when `purge_active_enabled`), tombstoned
+  with `reason="ACTIVE_AGE"`. Run via the `biometric_purge` management command.
+
+### GraphQL
+
+Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`;
+queries `identifyBiometric(modality, sample, topK, excludeSubject)`,
+`biometricTemplates(subjectId, subjectModel)` (metadata only — never
+plaintext vectors/templates), `biometricVerifications(subjectId, subjectModel)`.
+`subjectModel` is optional everywhere it appears, defaulting to
+`BIOMETRIC["SUBJECT_MODEL"]`. Samples travel base64 (optionally with a
+`data:...;base64,` prefix).
+
+### Deduplication seam
+
+This app registers a `BiometricCandidateSource` (kind `"biometric"`) with
+`deduplication.sources` in `AppConfig.ready()`, guarded by
+`try/except ImportError` — the deduplication package is optional. It scans
+active templates for one modality, runs `identify()` against the rest of the
+gallery, and yields a candidate per match at or above `DEDUP_THRESHOLD`.
 
 ---
 
-## Quick Start
+## `biometric_verification` — legacy 1:1 face verification (health)
+
+Verifies an insuree's identity at point of service by comparing a live
+webcam capture against the reference photo stored at enrollment. Requires
+`insuree` and `claim` installed — `BiometricEmbedding` FKs to `insuree.Insuree`
+and `ClaimFacialAudit` FKs to `claim.Claim` unconditionally.
+
+### Quick start
 
 ```bash
 pip install openimis-be-biometric_verification
@@ -47,15 +188,7 @@ Run migrations:
 python manage.py migrate biometric_verification
 ```
 
-`BiometricEmbedding` and `ClaimFacialAudit` (the legacy insuree 1:1 flow) are
-only defined, and their migrations only create tables, when `insuree`/`claim`
-are themselves installed. In an assembly without them (e.g. social
-protection), those two models and their migrations are no-ops; the
-multimodal models/services below are unaffected either way.
-
----
-
-## Usage
+### Usage
 
 **At enrollment** — pre-compute and store the insuree's face embedding:
 ```graphql
@@ -78,9 +211,7 @@ mutation {
 }
 ```
 
----
-
-## Switching Providers
+### Switching Providers
 
 Change `PROVIDER` in `settings.py` — no code changes needed:
 
@@ -93,109 +224,11 @@ Change `PROVIDER` in `settings.py` — no code changes needed:
 
 See `CLAUDE.md` for full provider implementation guide.
 
----
-
-## Requirements
+### Requirements
 
 - Python 3.8+
-- openIMIS backend (Django)
+- openIMIS backend (Django), `insuree` and `claim` installed
 - `deepface`, `opencv-python-headless`, `tf-keras`
-
----
-
-## Multimodal identity + deduplication (§3 of the biometric/dedup contract)
-
-Alongside the legacy insuree 1:1 flow above, this module addresses any
-subject as `(subject_model, subject_id)` — e.g. `"individual.Individual"` in
-social protection, `"insuree.Insuree"` in health — and supports several
-modalities (face, fingerprint, voice, iris, palmvein), each enrolled,
-verified and identified independently.
-
-### Configuration
-
-`BIOMETRIC_VERIFICATION` (or the `biometric_verification` `ModuleConfiguration`
-row) accepts, in addition to the legacy keys above:
-
-```python
-BIOMETRIC_VERIFICATION = {
-    "SUBJECT_MODEL": "individual.Individual",
-    "MODALITIES": {
-        "face":        {"provider": "deepface",        "threshold": 0.68},
-        "fingerprint": {"provider": "device_reported",  "threshold": 48},
-    },
-    "VECTOR_INDEX": "numpy",   # "numpy" (always available) | "pgvector" (only if the package is installed)
-    "TEMPLATE_KEY": None,      # Fernet key (cryptography.fernet); templates/vectors encrypted at rest when set
-    "REQUIRE_CONSENT": False,
-    "DEDUP_THRESHOLD": {"face": 0.62},   # similarity at/above which a dedup candidate is emitted
-    "FUSION": {
-        "weights": {"face": 1.0},
-        "thresholds": {"accept": 0.7, "review": 0.6},
-        "floors": {},
-        "floor_decision": "review",
-    },
-    "GQL_BIOMETRIC_ENROL_PERMS": ["174001"],
-    "GQL_BIOMETRIC_VERIFY_PERMS": ["174002"],
-    "GQL_BIOMETRIC_IDENTIFY_PERMS": ["174003"],
-    "GQL_BIOMETRIC_READ_PERMS": ["174004"],
-}
-```
-
-### Providers
-
-- `providers.base.ModalityProvider` — common base (`modality`, `provider_name`,
-  `kind`, `default_threshold`, `extract()`); `EmbeddingProvider` adds
-  `distance()`/`similarity()`, `MatcherProvider` adds `match()`.
-- `providers.deepface_provider.DeepFaceProvider` — also an `EmbeddingProvider`
-  for `modality="face"` (registered under `("face", "deepface")`).
-- `providers.device_reported.DeviceReportedMatcher` — stores a device-supplied
-  template as given; matching happens on the device, not the server. Registered
-  for every documented modality out of the box.
-- `providers.fake.FakeEmbeddingProvider` / `FakeMatcherProvider` — deterministic,
-  test-only providers (no ML model loaded).
-
-Register a custom one with `ProviderRegistry.register_modality(modality, name,
-provider_class)`; resolve the one configured for a modality with
-`ProviderRegistry.get_provider(modality)`.
-
-### Services (`biometric_verification.services`)
-
-- `enrol(subject_model, subject_id, modality, sample, *, position=None, actor, metadata=None, device_template=None)`
-  — extracts (or accepts a device template for) one sample, superseding any
-  previous active row on the same key. Refused when `REQUIRE_CONSENT` and no
-  `BiometricConsent` was granted.
-- `verify(subject_model, subject_id, modality, *, sample=None, device_score=None, ..., actor)`
-  — server path (extract + compare) or device path (`device_score` checked
-  against the modality threshold). Always writes a `BiometricVerification` row.
-- `identify(modality, *, sample=None, vector=None, template=None, top_k=5, scope=None, exclude_subject=None)`
-  — ranks the gallery for one modality/provider/model. NumPy cosine path always
-  available; `VECTOR_INDEX="pgvector"` routes to a lazy pgvector path instead.
-- `fuse(scores, *, weights=None, thresholds=None, floors=None, floor_decision=None, required=frozenset())`
-  — multimodal decision (`accept`/`review`/`reject`), tighten-only.
-- `consolidate(subject_model, kept_id, retired_id, *, actor)` — re-points
-  `retired`'s active templates to `kept` (or supersedes on key collision).
-  Bound to the `deduplication.subject_merged` service signal.
-- `templates_of(subject_model, subject_id, *, modality=None, actor, purpose="read")`
-  — the only sanctioned plaintext read path; decrypts and logs the access.
-- `purge(now=None, *, actor="retention")` — erases templates past
-  `BiometricRetentionPolicy.template_retention_days`; no-op unless the policy
-  has `purge_enabled` and a retention window set. Run via the `biometric_purge`
-  management command.
-
-### GraphQL
-
-Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`;
-queries `identifyBiometric(modality, sample, topK, excludeSubject)`,
-`biometricTemplates(subjectModel, subjectId)` (metadata only — never
-plaintext vectors/templates), `biometricVerifications(subjectModel, subjectId)`.
-Samples travel base64 (optionally with a `data:...;base64,` prefix).
-
-### Deduplication seam
-
-This module registers a `BiometricCandidateSource` (kind `"biometric"`) with
-`deduplication.sources` in `AppConfig.ready()`, guarded by
-`try/except ImportError` — the deduplication package is optional. It scans
-active templates for one modality, runs `identify()` against the rest of the
-gallery, and yields a candidate per match at or above `DEDUP_THRESHOLD`.
 
 ---
 

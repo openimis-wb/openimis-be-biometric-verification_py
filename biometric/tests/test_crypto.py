@@ -2,7 +2,7 @@
 
 from django.test import SimpleTestCase
 
-from biometric_verification import crypto
+from biometric import crypto
 
 
 class TestVectorRoundTrip(SimpleTestCase):
@@ -71,7 +71,7 @@ class TestWarnIfUnencrypted(SimpleTestCase):
 
     def test_warns_once_when_key_is_none(self):
         crypto._warned_no_key = False
-        with self.assertLogs("biometric_verification.crypto", level="WARNING") as ctx:
+        with self.assertLogs("biometric.crypto", level="WARNING") as ctx:
             crypto.warn_if_unencrypted(None)
         self.assertTrue(any("plaintext" in msg for msg in ctx.output))
         self.assertTrue(crypto._warned_no_key)
@@ -80,5 +80,5 @@ class TestWarnIfUnencrypted(SimpleTestCase):
     def test_no_warning_when_key_is_set(self):
         crypto._warned_no_key = False
         with self.assertRaises(AssertionError):
-            with self.assertLogs("biometric_verification.crypto", level="WARNING"):
+            with self.assertLogs("biometric.crypto", level="WARNING"):
                 crypto.warn_if_unencrypted("some-key")

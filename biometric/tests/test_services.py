@@ -4,15 +4,14 @@ providers registered per test — no ML model is ever loaded.
 """
 
 from datetime import timedelta
-from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from django.db import IntegrityError, transaction
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from biometric_verification.apps import BiometricVerificationConfig
-from biometric_verification.models import (
+from biometric.apps import BiometricConfig
+from biometric.models import (
     BiometricAccessLog,
     BiometricConsent,
     BiometricErasure,
@@ -20,12 +19,11 @@ from biometric_verification.models import (
     BiometricTemplate,
     BiometricVerification,
 )
-from biometric_verification.providers.base import Extracted
-from biometric_verification.providers.deepface_provider import DeepFaceProvider
-from biometric_verification.providers.device_reported import DeviceReportedMatcher
-from biometric_verification.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
-from biometric_verification.registry import ProviderRegistry
-from biometric_verification.services import (
+from biometric.providers.base import Extracted
+from biometric.providers.device_reported import DeviceReportedMatcher
+from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
+from biometric.registry import ProviderRegistry
+from biometric.services import (
     ConsentRequiredError,
     consolidate,
     enrol,
@@ -35,7 +33,7 @@ from biometric_verification.services import (
     templates_of,
     verify,
 )
-from biometric_verification.signals import on_subject_merged
+from biometric.signals import on_subject_merged
 
 SUBJECT_MODEL = "individual.Individual"
 
@@ -46,24 +44,24 @@ class _MultimodalServiceTestCase(TestCase):
     def setUp(self):
         super().setUp()
         self._cfg_snapshot = {
-            "modalities": BiometricVerificationConfig.modalities,
-            "template_key": BiometricVerificationConfig.template_key,
-            "require_consent": BiometricVerificationConfig.require_consent,
-            "dedup_threshold": BiometricVerificationConfig.dedup_threshold,
-            "fusion": BiometricVerificationConfig.fusion,
-            "vector_index": BiometricVerificationConfig.vector_index,
+            "modalities": BiometricConfig.modalities,
+            "template_key": BiometricConfig.template_key,
+            "require_consent": BiometricConfig.require_consent,
+            "dedup_threshold": BiometricConfig.dedup_threshold,
+            "fusion": BiometricConfig.fusion,
+            "vector_index": BiometricConfig.vector_index,
         }
         self._registry_snapshot = dict(ProviderRegistry._modality_registry)
         self._instances_snapshot = dict(ProviderRegistry._modality_instances)
         ProviderRegistry._modality_instances.clear()
 
-        BiometricVerificationConfig.modalities = {
+        BiometricConfig.modalities = {
             "face": {"provider": "fake_embedding", "threshold": 0.68},
             "fingerprint": {"provider": "fake_matcher", "threshold": 50.0},
             "voice_device": {"provider": "device_reported", "threshold": 48},
         }
-        BiometricVerificationConfig.template_key = None
-        BiometricVerificationConfig.require_consent = False
+        BiometricConfig.template_key = None
+        BiometricConfig.require_consent = False
         ProviderRegistry.register_modality("face", "fake_embedding", FakeEmbeddingProvider)
         ProviderRegistry.register_modality("fingerprint", "fake_matcher", FakeMatcherProvider)
         ProviderRegistry.register_modality("voice_device", "device_reported", DeviceReportedMatcher)
@@ -71,7 +69,7 @@ class _MultimodalServiceTestCase(TestCase):
     def tearDown(self):
         super().tearDown()
         for key, value in self._cfg_snapshot.items():
-            setattr(BiometricVerificationConfig, key, value)
+            setattr(BiometricConfig, key, value)
         ProviderRegistry._modality_registry.clear()
         ProviderRegistry._modality_registry.update(self._registry_snapshot)
         ProviderRegistry._modality_instances.clear()
@@ -105,12 +103,12 @@ class TestEnrol(_MultimodalServiceTestCase):
         )
 
     def test_refuses_without_consent_when_required(self):
-        BiometricVerificationConfig.require_consent = True
+        BiometricConfig.require_consent = True
         with self.assertRaises(ConsentRequiredError):
             enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="tester")
 
     def test_allows_when_consent_granted(self):
-        BiometricVerificationConfig.require_consent = True
+        BiometricConfig.require_consent = True
         BiometricConsent.objects.create(
             subject_model=SUBJECT_MODEL, subject_id="s1", modality="face",
             granted=True, recorded_by="tester",
@@ -129,7 +127,7 @@ class TestEnrol(_MultimodalServiceTestCase):
 
     def test_encrypts_at_rest_when_template_key_set(self):
         key = Fernet.generate_key()
-        BiometricVerificationConfig.template_key = key
+        BiometricConfig.template_key = key
 
         plaintext_provider = FakeEmbeddingProvider()
         expected_vector = plaintext_provider.extract(b"photo").vector
@@ -187,64 +185,6 @@ class TestVerify(_MultimodalServiceTestCase):
         self.assertAlmostEqual(result.confidence, 1.0, places=5)
 
 
-class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
-    """
-    Regression test for the threshold-scale bug: legacy verify_from_embedding
-    (distance <= similarity_threshold) and the new verify() (similarity >=
-    modality threshold) must reach the same verdict for the same pair, at the
-    default config, on the real DeepFaceProvider. Only get_embedding() is
-    stubbed (no deepface package is installed in this environment) — the
-    threshold/decision logic in both paths runs for real.
-    """
-
-    # 60 degrees apart, both unit vectors: cosine distance = 0.5, similarity = 0.5.
-    # Legacy: 0.5 <= 0.68 -> verified. Pre-fix new path: 0.5 >= 0.68 -> NOT verified
-    # (the bug). Fixed new path: 0.5 >= 0.32 -> verified (matches legacy).
-    PROBE_VECTOR = [1.0, 0.0]
-    REFERENCE_VECTOR = [0.5, 0.8660254037844387]
-
-    def setUp(self):
-        self._legacy_threshold = BiometricVerificationConfig.similarity_threshold
-        self._modalities = BiometricVerificationConfig.modalities
-        self._registry_snapshot = dict(ProviderRegistry._modality_registry)
-        self._instances_snapshot = dict(ProviderRegistry._modality_instances)
-
-        BiometricVerificationConfig.similarity_threshold = 0.68
-        BiometricVerificationConfig.modalities = {"face": {"provider": "deepface", "threshold": 0.32}}
-        ProviderRegistry._modality_instances.clear()
-        ProviderRegistry.register_modality("face", "deepface", DeepFaceProvider)
-
-        self._get_embedding_patch = patch.object(
-            DeepFaceProvider, "get_embedding", return_value=self.PROBE_VECTOR,
-        )
-        self._get_embedding_patch.start()
-
-    def tearDown(self):
-        self._get_embedding_patch.stop()
-        BiometricVerificationConfig.similarity_threshold = self._legacy_threshold
-        BiometricVerificationConfig.modalities = self._modalities
-        ProviderRegistry._modality_registry.clear()
-        ProviderRegistry._modality_registry.update(self._registry_snapshot)
-        ProviderRegistry._modality_instances.clear()
-        ProviderRegistry._modality_instances.update(self._instances_snapshot)
-
-    def test_same_verdict_at_default_thresholds(self):
-        legacy_provider = DeepFaceProvider()
-        legacy_result = legacy_provider.verify_from_embedding(
-            probe_image=b"unused-because-get_embedding-is-stubbed",
-            reference_embedding=self.REFERENCE_VECTOR,
-        )
-
-        BiometricTemplate.objects.create(
-            subject_model=SUBJECT_MODEL, subject_id="s1", modality="face", kind="embedding",
-            vector=self.REFERENCE_VECTOR, provider="deepface", model_name=legacy_provider.model_name,
-        )
-        new_result = verify(SUBJECT_MODEL, "s1", "face", sample=b"unused", actor="tester")
-
-        self.assertTrue(legacy_result.verified, "legacy path should verify this pair")
-        self.assertEqual(legacy_result.verified, new_result.verified)
-
-
 class TestIdentify(_MultimodalServiceTestCase):
 
     def _make_template(self, subject_id, vector, metadata=None):
@@ -290,8 +230,8 @@ class TestIdentify(_MultimodalServiceTestCase):
         self.assertEqual(len(matches), 2)
 
     def test_pgvector_flag_routes_without_importing_pgvector(self):
-        BiometricVerificationConfig.vector_index = "pgvector"
-        import biometric_verification.services as services_module
+        BiometricConfig.vector_index = "pgvector"
+        import biometric.services as services_module
 
         called = {}
 
@@ -309,28 +249,27 @@ class TestIdentify(_MultimodalServiceTestCase):
         self.assertTrue(called.get("hit"))
         self.assertEqual(result, [])
 
-    def test_pgvector_path_defers_its_import_to_point_of_use(self):
-        # Confirms _identify_pgvector's `import pgvector` is not paid by every
-        # identify() call — only by one actually routed to the pgvector path.
-        # Raises ImportError where the package is absent (this environment) or
-        # NotImplementedError where it's present but the vector column isn't
-        # provisioned (see services._identify_pgvector) — either is correct.
-        BiometricVerificationConfig.vector_index = "pgvector"
-        with self.assertRaises((ImportError, NotImplementedError)):
+    def test_pgvector_without_app_installed_raises_improperly_configured(self):
+        # §6.2: the biometric_pgvector app is the gate, not the pgvector
+        # package — ImproperlyConfigured is raised before any import attempt.
+        from django.core.exceptions import ImproperlyConfigured
+
+        BiometricConfig.vector_index = "pgvector"
+        with self.assertRaises(ImproperlyConfigured):
             identify("face", vector=[1.0, 0.0])
 
 
 class TestFuse(SimpleTestCase):
 
     def setUp(self):
-        self._modalities = BiometricVerificationConfig.modalities
-        BiometricVerificationConfig.modalities = {
+        self._modalities = BiometricConfig.modalities
+        BiometricConfig.modalities = {
             "face": {"threshold": 0.7},
             "fingerprint": {"threshold": 50.0},
         }
 
     def tearDown(self):
-        BiometricVerificationConfig.modalities = self._modalities
+        BiometricConfig.modalities = self._modalities
 
     def test_weighted_mean_normalised_to_threshold(self):
         # Both legs exactly at their threshold -> normalised score == 1.0 -> accept.
@@ -573,12 +512,90 @@ class TestPurge(_MultimodalServiceTestCase):
         self.assertTrue(BiometricTemplate.objects.filter(id=active.id).exists())
         self.assertTrue(BiometricTemplate.objects.filter(id=recent.id).exists())
 
+    # --- active-template retention (§6.3) ---
+
+    def test_active_purge_disabled_by_default_leaves_old_active_template(self):
+        BiometricRetentionPolicy.objects.create(
+            purge_enabled=False, purge_active_enabled=False,
+        )
+        now = timezone.now()
+        old_active = enrol(SUBJECT_MODEL, "s1", "face", b"old-active-photo", actor="tester")
+        BiometricTemplate.objects.filter(id=old_active.id).update(
+            validity_from=now - timedelta(days=400)
+        )
+
+        result = purge(now=now, actor="retention")
+
+        self.assertIsNone(result)
+        self.assertTrue(BiometricTemplate.objects.filter(id=old_active.id).exists())
+
+    def test_active_purge_check_constraint_blocks_enabled_without_days(self):
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                BiometricRetentionPolicy.objects.create(
+                    purge_active_enabled=True, active_template_retention_days=None,
+                )
+
+    def test_active_purge_erases_old_active_template_with_active_age_reason(self):
+        BiometricRetentionPolicy.objects.create(
+            purge_active_enabled=True, active_template_retention_days=365,
+        )
+        now = timezone.now()
+        old_active = enrol(SUBJECT_MODEL, "s1", "face", b"old-active-photo", actor="tester")
+        BiometricTemplate.objects.filter(id=old_active.id).update(
+            validity_from=now - timedelta(days=400)
+        )
+
+        tombstone = purge(now=now, actor="retention")
+
+        self.assertIsNotNone(tombstone)
+        self.assertEqual(tombstone.reason, "ACTIVE_AGE")
+        self.assertFalse(BiometricTemplate.objects.filter(id=old_active.id).exists())
+
+    def test_active_purge_leaves_recent_active_template(self):
+        BiometricRetentionPolicy.objects.create(
+            purge_active_enabled=True, active_template_retention_days=365,
+        )
+        recent_active = enrol(SUBJECT_MODEL, "s1", "face", b"recent-active-photo", actor="tester")
+
+        result = purge(actor="retention")
+
+        self.assertIsNone(result)
+        self.assertTrue(BiometricTemplate.objects.filter(id=recent_active.id).exists())
+
+    def test_superseded_purged_before_active(self):
+        # Both windows enabled: a superseded row and an old-but-active row are
+        # each erased by their own pass, with distinct tombstone reasons.
+        BiometricRetentionPolicy.objects.create(
+            purge_enabled=True, template_retention_days=30,
+            purge_active_enabled=True, active_template_retention_days=365,
+        )
+        now = timezone.now()
+
+        superseded = enrol(SUBJECT_MODEL, "s1", "face", b"superseded-photo", actor="tester")
+        BiometricTemplate.objects.filter(id=superseded.id).update(
+            validity_to=now - timedelta(days=40),
+        )
+        old_active = enrol(SUBJECT_MODEL, "s2", "face", b"old-active-photo", actor="tester")
+        BiometricTemplate.objects.filter(id=old_active.id).update(
+            validity_from=now - timedelta(days=400),
+        )
+
+        purge(now=now, actor="retention")
+
+        self.assertFalse(BiometricTemplate.objects.filter(id=superseded.id).exists())
+        self.assertFalse(BiometricTemplate.objects.filter(id=old_active.id).exists())
+        reasons = set(
+            BiometricErasure.objects.filter(subject_id__in=["s1", "s2"]).values_list("reason", flat=True)
+        )
+        self.assertEqual(reasons, {"retention", "ACTIVE_AGE"})
+
 
 class TestTemplatesOf(_MultimodalServiceTestCase):
 
     def test_decrypts_and_logs_access(self):
         key = Fernet.generate_key()
-        BiometricVerificationConfig.template_key = key
+        BiometricConfig.template_key = key
 
         plaintext_provider = FakeEmbeddingProvider()
         expected_vector = plaintext_provider.extract(b"photo").vector
@@ -601,3 +618,53 @@ class TestTemplatesOf(_MultimodalServiceTestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["modality"], "face")
+
+
+class TestSubjectModelDefault(_MultimodalServiceTestCase):
+    """subject_model is optional everywhere, defaulting to BIOMETRIC["SUBJECT_MODEL"] (§6.3)."""
+
+    def setUp(self):
+        super().setUp()
+        self._subject_model_default = BiometricConfig.subject_model
+        BiometricConfig.subject_model = "individual.Individual"
+
+    def tearDown(self):
+        BiometricConfig.subject_model = self._subject_model_default
+        super().tearDown()
+
+    def test_enrol_defaults_subject_model(self):
+        template = enrol(subject_id="s1", modality="face", sample=b"photo", actor="tester")
+        self.assertEqual(template.subject_model, "individual.Individual")
+
+    def test_verify_defaults_subject_model(self):
+        enrol(subject_id="s1", modality="face", sample=b"reference-photo", actor="tester")
+        result = verify(subject_id="s1", modality="face", sample=b"reference-photo", actor="tester")
+        self.assertTrue(result.verified)
+        self.assertTrue(
+            BiometricVerification.objects.filter(
+                subject_model="individual.Individual", subject_id="s1",
+            ).exists()
+        )
+
+    def test_consolidate_defaults_subject_model(self):
+        enrol(subject_id="retired-1", modality="face", sample=b"photo", actor="tester")
+        counts = consolidate(kept_id="kept-1", retired_id="retired-1", actor="tester")
+        self.assertEqual(counts.get("face"), 1)
+        self.assertTrue(
+            BiometricTemplate.objects.filter(
+                subject_model="individual.Individual", subject_id="kept-1", validity_to__isnull=True,
+            ).exists()
+        )
+
+    def test_templates_of_defaults_subject_model(self):
+        enrol(subject_id="s1", modality="face", sample=b"photo", actor="tester")
+        results = templates_of(subject_id="s1", actor="reader")
+        self.assertEqual(len(results), 1)
+
+    def test_explicit_subject_model_still_wins_over_default(self):
+        BiometricConfig.subject_model = "individual.Individual"
+        template = enrol(
+            subject_model="other.Model", subject_id="s1", modality="face",
+            sample=b"photo", actor="tester",
+        )
+        self.assertEqual(template.subject_model, "other.Model")

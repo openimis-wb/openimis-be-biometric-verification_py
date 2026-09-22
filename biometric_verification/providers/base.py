@@ -3,7 +3,7 @@ import math
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,6 @@ class VerificationResult:
     provider: Optional[str] = None
     metadata: dict = field(default_factory=dict)
     error: Optional[str] = None
-    # Multimodal services.verify() extension — unused by the legacy insuree flow.
-    modality: Optional[str] = None
-    origin: Optional[str] = None
-    threshold: Optional[float] = None
 
 
 class BaseBiometricProvider(ABC):
@@ -220,60 +216,3 @@ def _cosine_distance(a: list, b: list) -> float:
     if norm_a == 0.0 or norm_b == 0.0:
         return 1.0
     return 1.0 - (dot / (norm_a * norm_b))
-
-
-# ---------------------------------------------------------------------------
-# Multimodal provider interface (docs/wb-biometric-dedup-seam.md §3.1)
-#
-# BaseBiometricProvider/VerificationResult above stay the legacy 1:1 insuree
-# flow (unchanged behaviour). ModalityProvider and its two kinds are the
-# interface for enrol/verify/identify (services.py) across any modality.
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Extracted:
-    """What a provider produces from one raw sample."""
-    vector: Optional[List[float]] = None       # EmbeddingProvider
-    template: Optional[bytes] = None           # MatcherProvider, vendor format
-    template_iso: Optional[bytes] = None       # ISO/IEC 19794 where the SDK gives it
-    quality: Optional[float] = None            # 0–100, NFIQ-like where applicable
-    metadata: dict = field(default_factory=dict)
-
-
-class ModalityProvider(ABC):
-    """Common base for embedding and template-matching providers."""
-
-    modality: str            # "face" | "fingerprint" | "voice" | "iris" | "palmvein"
-    provider_name: str
-    kind: str                # "embedding" | "template"
-    default_threshold: float
-
-    @abstractmethod
-    def extract(self, sample: bytes, position: Optional[str] = None) -> Extracted:
-        """Extract a vector or template from one raw sample."""
-
-    def health_check(self) -> bool:
-        return True
-
-
-class EmbeddingProvider(ModalityProvider):
-    """Produces a comparable float vector; distance() drives matching."""
-
-    kind = "embedding"
-
-    @abstractmethod
-    def distance(self, a: List[float], b: List[float]) -> float:
-        """Lower = closer."""
-
-    def similarity(self, a: List[float], b: List[float]) -> float:
-        return 1.0 - self.distance(a, b)
-
-
-class MatcherProvider(ModalityProvider):
-    """Produces an opaque template; match() compares two templates directly."""
-
-    kind = "template"
-
-    @abstractmethod
-    def match(self, probe: bytes, reference: bytes) -> float:
-        """Higher = more similar."""

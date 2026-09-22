@@ -7,11 +7,11 @@ it's installed side-by-side — see dedup_source.py's try/except).
 
 from django.test import TestCase
 
-from biometric_verification.apps import BiometricVerificationConfig
-from biometric_verification.dedup_source import BiometricCandidateSource, Watermark, order_pair
-from biometric_verification.models import BiometricTemplate
-from biometric_verification.providers.fake import FakeEmbeddingProvider
-from biometric_verification.registry import ProviderRegistry
+from biometric.apps import BiometricConfig
+from biometric.dedup_source import BiometricCandidateSource, Watermark, order_pair
+from biometric.models import BiometricTemplate
+from biometric.providers.fake import FakeEmbeddingProvider
+from biometric.registry import ProviderRegistry
 
 SUBJECT_MODEL = "individual.Individual"
 
@@ -25,10 +25,10 @@ class _DedupSourceTestCase(TestCase):
 
     def setUp(self):
         super().setUp()
-        self._dedup_threshold = BiometricVerificationConfig.dedup_threshold
-        self._modalities = BiometricVerificationConfig.modalities
-        BiometricVerificationConfig.dedup_threshold = {"face": 0.9}
-        BiometricVerificationConfig.modalities = {"face": {"provider": "fake_embedding", "threshold": 0.68}}
+        self._dedup_threshold = BiometricConfig.dedup_threshold
+        self._modalities = BiometricConfig.modalities
+        BiometricConfig.dedup_threshold = {"face": 0.9}
+        BiometricConfig.modalities = {"face": {"provider": "fake_embedding", "threshold": 0.68}}
         self._registry_snapshot = dict(ProviderRegistry._modality_registry)
         self._instances_snapshot = dict(ProviderRegistry._modality_instances)
         ProviderRegistry._modality_instances.clear()
@@ -36,8 +36,8 @@ class _DedupSourceTestCase(TestCase):
 
     def tearDown(self):
         super().tearDown()
-        BiometricVerificationConfig.dedup_threshold = self._dedup_threshold
-        BiometricVerificationConfig.modalities = self._modalities
+        BiometricConfig.dedup_threshold = self._dedup_threshold
+        BiometricConfig.modalities = self._modalities
         ProviderRegistry._modality_registry.clear()
         ProviderRegistry._modality_registry.update(self._registry_snapshot)
         ProviderRegistry._modality_instances.clear()

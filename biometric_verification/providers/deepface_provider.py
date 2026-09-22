@@ -2,7 +2,7 @@ import io
 import logging
 from typing import Optional
 
-from .base import BaseBiometricProvider, EmbeddingProvider, Extracted, VerificationResult, _cosine_distance
+from .base import BaseBiometricProvider, VerificationResult
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ _DEFAULT_MODEL = "ArcFace"
 _DEFAULT_DETECTOR = "retinaface"  # Changed from opencv - more accurate face detection
 
 
-class DeepFaceProvider(BaseBiometricProvider, EmbeddingProvider):
+class DeepFaceProvider(BaseBiometricProvider):
     """
     Local face verification using the DeepFace library.
 
@@ -68,24 +68,6 @@ class DeepFaceProvider(BaseBiometricProvider, EmbeddingProvider):
     """
 
     provider_name = "deepface"
-
-    # ModalityProvider identity.
-    modality = "face"
-
-    @property
-    def default_threshold(self) -> float:
-        """
-        Similarity floor derived from the legacy distance threshold, so both
-        paths accept the same pairs at the same configured number: legacy
-        verify_from_embedding accepts when distance <= similarity_threshold;
-        this path accepts when similarity (1 - distance) >= 1 - similarity_threshold.
-        """
-        from biometric_verification.apps import BiometricVerificationConfig
-
-        legacy_distance_threshold = BiometricVerificationConfig.similarity_threshold
-        if legacy_distance_threshold is None:
-            legacy_distance_threshold = 0.68
-        return 1.0 - legacy_distance_threshold
 
     def __init__(
         self,
@@ -285,18 +267,6 @@ class DeepFaceProvider(BaseBiometricProvider, EmbeddingProvider):
     def health_check(self) -> bool:
         """Return True if deepface is importable."""
         return _DEEPFACE_AVAILABLE
-
-    # ------------------------------------------------------------------
-    # EmbeddingProvider (ModalityProvider) implementation
-    # ------------------------------------------------------------------
-
-    def extract(self, sample: bytes, position: Optional[str] = None) -> Extracted:
-        """Face has no position — wraps get_embedding()."""
-        return Extracted(vector=self.get_embedding(sample))
-
-    def distance(self, a: list, b: list) -> float:
-        """Same cosine distance used by the legacy verify_from_embedding() path."""
-        return _cosine_distance(a, b)
 
     # ------------------------------------------------------------------
     # Internal helpers

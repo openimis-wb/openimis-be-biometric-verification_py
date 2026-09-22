@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from django.core.exceptions import PermissionDenied
 from django.test import SimpleTestCase
 
-from biometric_verification.schema import (
+from biometric.schema import (
     EnrolBiometricMutation,
     Query,
     RecordBiometricConsentMutation,
@@ -48,8 +48,8 @@ class TestEnrolBiometricMutation(SimpleTestCase):
                 modality="face", sample=base64.b64encode(b"x").decode(),
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.services.enrol")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.enrol")
     def test_authenticated_calls_enrol_with_decoded_sample(self, mock_enrol, mock_cfg):
         mock_cfg.gql_biometric_enrol_perms = []
         template = MagicMock()
@@ -76,11 +76,33 @@ class TestEnrolBiometricMutation(SimpleTestCase):
 
         mock_enrol.assert_called_once()
         args, kwargs = mock_enrol.call_args
+        # Positional order forwarded to services.enrol(subject_model, subject_id, modality, sample, ...).
+        self.assertEqual(args[0], "individual.Individual")
         self.assertEqual(args[3], b"raw-bytes")
         self.assertEqual(kwargs["actor"], "tester")
         self.assertEqual(result.id, "tid-1")
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.enrol")
+    def test_subject_model_is_optional(self, mock_enrol, mock_cfg):
+        # §6.3: subject_model is not required — the mutation still accepts
+        # the call and forwards None, which services.enrol() defaults.
+        mock_cfg.gql_biometric_enrol_perms = []
+        template = MagicMock()
+        for attr in ("id", "subject_model", "subject_id", "modality", "position", "kind",
+                     "quality", "provider", "model_name", "encrypted", "validity_from", "validity_to"):
+            setattr(template, attr, None)
+        mock_enrol.return_value = template
+
+        EnrolBiometricMutation.mutate(
+            None, _make_info(_auth_user()), subject_id="s1",
+            modality="face", sample=base64.b64encode(b"x").decode(),
+        )
+
+        args, _ = mock_enrol.call_args
+        self.assertIsNone(args[0])
+
+    @patch("biometric.schema.BiometricConfig")
     def test_missing_perms_raises_permission_denied(self, mock_cfg):
         mock_cfg.gql_biometric_enrol_perms = ["174001"]
         user = _auth_user(has_perms=False)
@@ -90,8 +112,8 @@ class TestEnrolBiometricMutation(SimpleTestCase):
                 subject_id="s1", modality="face", sample=base64.b64encode(b"x").decode(),
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.services.enrol")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.enrol")
     def test_data_uri_prefix_is_stripped(self, mock_enrol, mock_cfg):
         mock_cfg.gql_biometric_enrol_perms = []
         template = MagicMock()
@@ -119,8 +141,8 @@ class TestVerifyBiometricMutation(SimpleTestCase):
                 subject_id="s1", modality="face",
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.services.verify")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.verify")
     def test_device_path_forwards_device_score(self, mock_verify, mock_cfg):
         mock_cfg.gql_biometric_verify_perms = []
         result = MagicMock(verified=True, confidence=60.0, provider="device_reported",
@@ -139,7 +161,7 @@ class TestVerifyBiometricMutation(SimpleTestCase):
         self.assertTrue(out.verified)
         self.assertEqual(out.origin, "device")
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
+    @patch("biometric.schema.BiometricConfig")
     def test_missing_perms_raises_permission_denied(self, mock_cfg):
         mock_cfg.gql_biometric_verify_perms = ["174002"]
         user = _auth_user(has_perms=False)
@@ -159,8 +181,8 @@ class TestRecordBiometricConsentMutation(SimpleTestCase):
                 subject_id="s1", modality="face", granted=True,
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.models.BiometricConsent")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.models.BiometricConsent")
     def test_creates_consent_row(self, mock_consent_model, mock_cfg):
         mock_cfg.gql_biometric_enrol_perms = []
         created = MagicMock()
@@ -188,8 +210,8 @@ class TestIdentifyBiometricQuery(SimpleTestCase):
                 None, _make_info(_anon_user()), modality="face", sample=base64.b64encode(b"x").decode(),
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.services.identify")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.identify")
     def test_authenticated_returns_matches(self, mock_identify, mock_cfg):
         mock_cfg.gql_biometric_identify_perms = []
         match = MagicMock(subject_model="individual.Individual", subject_id="s2", template_id="t2", score=0.9)
@@ -214,8 +236,8 @@ class TestBiometricTemplatesQuery(SimpleTestCase):
                 None, _make_info(_anon_user()), subject_model="individual.Individual", subject_id="s1",
             )
 
-    @patch("biometric_verification.schema.BiometricVerificationConfig")
-    @patch("biometric_verification.models.BiometricTemplate")
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.models.BiometricTemplate")
     def test_authenticated_returns_template_metadata_only(self, mock_model, mock_cfg):
         mock_cfg.gql_biometric_read_perms = []
         row = MagicMock()

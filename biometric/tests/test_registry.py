@@ -1,32 +1,12 @@
 """
-Unit tests for ProviderRegistry.register_modality()/get_provider() (§3.2).
-
-Uses a separate dict from the legacy register()/get_active_provider() —
-these tests clear/restore only the modality-keyed state so test_registry.py
-is unaffected.
+Unit tests for ProviderRegistry.register_modality()/get_provider() (§3.2, §6.1).
 """
 
 from django.test import SimpleTestCase
 
-from biometric_verification.apps import BiometricVerificationConfig
-from biometric_verification.providers.base import (
-    BaseBiometricProvider,
-    EmbeddingProvider,
-    Extracted,
-    MatcherProvider,
-    VerificationResult,
-)
-from biometric_verification.registry import ProviderRegistry
-
-
-class _LegacyStubProvider(BaseBiometricProvider):
-    provider_name = "legacy-stub"
-
-    def verify(self, probe_image, reference_image, threshold=None):
-        return VerificationResult(verified=True, provider=self.provider_name)
-
-    def get_embedding(self, image):
-        return [0.1, 0.2]
+from biometric.apps import BiometricConfig
+from biometric.providers.base import EmbeddingProvider, Extracted, MatcherProvider
+from biometric.registry import ProviderRegistry
 
 
 class _AlphaEmbedding(EmbeddingProvider):
@@ -61,7 +41,7 @@ class TestRegisterModality(SimpleTestCase):
     def setUp(self):
         self._registry = dict(ProviderRegistry._modality_registry)
         self._instances = dict(ProviderRegistry._modality_instances)
-        self._modalities = BiometricVerificationConfig.modalities
+        self._modalities = BiometricConfig.modalities
         ProviderRegistry._modality_registry.clear()
         ProviderRegistry._modality_instances.clear()
 
@@ -70,7 +50,7 @@ class TestRegisterModality(SimpleTestCase):
         ProviderRegistry._modality_instances.clear()
         ProviderRegistry._modality_registry.update(self._registry)
         ProviderRegistry._modality_instances.update(self._instances)
-        BiometricVerificationConfig.modalities = self._modalities
+        BiometricConfig.modalities = self._modalities
 
     def test_register_adds_to_modality_registry(self):
         ProviderRegistry.register_modality("face", "alpha", _AlphaEmbedding)
@@ -80,12 +60,8 @@ class TestRegisterModality(SimpleTestCase):
         with self.assertRaises(TypeError):
             ProviderRegistry.register_modality("face", "bad", object)
 
-    def test_does_not_touch_legacy_registry(self):
-        ProviderRegistry.register_modality("face", "alpha", _AlphaEmbedding)
-        self.assertNotIn("alpha", ProviderRegistry._registry)
-
     def test_get_provider_instantiates_configured_provider(self):
-        BiometricVerificationConfig.modalities = {"face": {"provider": "alpha", "threshold": 0.42}}
+        BiometricConfig.modalities = {"face": {"provider": "alpha", "threshold": 0.42}}
         ProviderRegistry.register_modality("face", "alpha", _AlphaEmbedding)
 
         provider = ProviderRegistry.get_provider("face")
@@ -95,7 +71,7 @@ class TestRegisterModality(SimpleTestCase):
         self.assertEqual(provider.default_threshold, 0.42)
 
     def test_get_provider_is_cached(self):
-        BiometricVerificationConfig.modalities = {"face": {"provider": "alpha"}}
+        BiometricConfig.modalities = {"face": {"provider": "alpha"}}
         ProviderRegistry.register_modality("face", "alpha", _AlphaEmbedding)
 
         p1 = ProviderRegistry.get_provider("face")
@@ -104,17 +80,17 @@ class TestRegisterModality(SimpleTestCase):
         self.assertIs(p1, p2)
 
     def test_get_provider_unknown_name_raises_key_error(self):
-        BiometricVerificationConfig.modalities = {"face": {"provider": "nonexistent"}}
+        BiometricConfig.modalities = {"face": {"provider": "nonexistent"}}
         with self.assertRaises(KeyError):
             ProviderRegistry.get_provider("face")
 
     def test_get_provider_missing_modality_config_raises_key_error(self):
-        BiometricVerificationConfig.modalities = {}
+        BiometricConfig.modalities = {}
         with self.assertRaises(KeyError):
             ProviderRegistry.get_provider("iris")
 
     def test_different_modalities_resolve_independently(self):
-        BiometricVerificationConfig.modalities = {
+        BiometricConfig.modalities = {
             "face": {"provider": "alpha"},
             "fingerprint": {"provider": "beta", "threshold": 48},
         }
@@ -144,43 +120,3 @@ class TestBuiltinModalityRegistrations(SimpleTestCase):
         except ImportError:
             self.skipTest("deepface not installed")
         self.assertIn(("face", "deepface"), ProviderRegistry._modality_registry)
-
-
-class TestLegacyGetActiveProviderUnchanged(SimpleTestCase):
-    """
-    §3.7: "legacy get_active_provider unchanged". The pre-existing
-    test_registry.py exercises this via @patch("...registry.BiometricVerificationConfig"),
-    which fails because get_active_provider() imports it locally (unrelated to
-    this branch's changes — see the final report). This test proves the same
-    behaviour by setting the real config class attribute directly instead.
-    """
-
-    def setUp(self):
-        self._registry = dict(ProviderRegistry._registry)
-        self._instances = dict(ProviderRegistry._instances)
-        self._provider = BiometricVerificationConfig.provider
-        self._provider_config = BiometricVerificationConfig.provider_config
-
-    def tearDown(self):
-        ProviderRegistry._registry.clear()
-        ProviderRegistry._instances.clear()
-        ProviderRegistry._registry.update(self._registry)
-        ProviderRegistry._instances.update(self._instances)
-        BiometricVerificationConfig.provider = self._provider
-        BiometricVerificationConfig.provider_config = self._provider_config
-
-    def test_returns_cached_instance_for_configured_provider(self):
-        ProviderRegistry.register("legacy-stub", _LegacyStubProvider)
-        BiometricVerificationConfig.provider = "legacy-stub"
-        BiometricVerificationConfig.provider_config = {}
-
-        p1 = ProviderRegistry.get_active_provider()
-        p2 = ProviderRegistry.get_active_provider()
-
-        self.assertIsInstance(p1, _LegacyStubProvider)
-        self.assertIs(p1, p2)
-
-    def test_unknown_provider_still_raises_key_error(self):
-        BiometricVerificationConfig.provider = "nonexistent-legacy-provider"
-        with self.assertRaises(KeyError):
-            ProviderRegistry.get_active_provider()

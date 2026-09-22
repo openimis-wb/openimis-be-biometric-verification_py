@@ -1,11 +1,11 @@
 """
-Fernet encryption for template/vector at-rest storage (§3.3).
+Fernet encryption for template/vector at-rest storage.
 
 Vectors and templates are plaintext only inside the service layer; models
 store either plaintext or Fernet ciphertext depending on whether
-BIOMETRIC_VERIFICATION["TEMPLATE_KEY"] is set. This module never reads
-config itself — callers pass the key explicitly so it stays testable
-without touching BiometricVerificationConfig.
+BIOMETRIC["TEMPLATE_KEY"] is set. This module never reads config itself —
+callers pass the key explicitly so it stays testable without touching
+BiometricConfig.
 """
 
 import json
@@ -23,7 +23,7 @@ def warn_if_unencrypted(key):
     global _warned_no_key
     if key is None and not _warned_no_key:
         logger.warning(
-            "BIOMETRIC_VERIFICATION['TEMPLATE_KEY'] is not set — biometric "
+            "BIOMETRIC['TEMPLATE_KEY'] is not set — biometric "
             "vectors and templates are stored in plaintext."
         )
         _warned_no_key = True

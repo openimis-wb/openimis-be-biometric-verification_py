@@ -1,22 +1,21 @@
 """
 Unit tests for the ModalityProvider interface (§3.1): Extracted, the ABC
-hierarchy, DeepFaceProvider's new EmbeddingProvider methods (math only — no
+hierarchy, DeepFaceProvider's EmbeddingProvider methods (math only — no
 deepface import), device_reported.DeviceReportedMatcher, and the fake
 providers used everywhere else in this test suite.
 """
 
 from django.test import SimpleTestCase
 
-from biometric_verification.apps import BiometricVerificationConfig
-from biometric_verification.providers.base import (
+from biometric.providers.base import (
     EmbeddingProvider,
     Extracted,
     MatcherProvider,
     ModalityProvider,
 )
-from biometric_verification.providers.deepface_provider import DeepFaceProvider
-from biometric_verification.providers.device_reported import DeviceReportedMatcher
-from biometric_verification.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
+from biometric.providers.deepface_provider import DeepFaceProvider
+from biometric.providers.device_reported import DeviceReportedMatcher
+from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
 
 
 class TestExtracted(SimpleTestCase):
@@ -54,26 +53,23 @@ class TestModalityProviderABC(SimpleTestCase):
 
 
 class TestDeepFaceProviderEmbeddingInterface(SimpleTestCase):
-    """Covers the new EmbeddingProvider surface without importing deepface."""
-
-    def setUp(self):
-        self._legacy_threshold = BiometricVerificationConfig.similarity_threshold
-
-    def tearDown(self):
-        BiometricVerificationConfig.similarity_threshold = self._legacy_threshold
+    """Covers the EmbeddingProvider surface without importing deepface."""
 
     def test_identity(self):
         provider = DeepFaceProvider()
         self.assertEqual(provider.modality, "face")
         self.assertEqual(provider.kind, "embedding")
+        self.assertEqual(provider.provider_name, "deepface")
 
-    def test_default_threshold_derives_from_legacy_distance_threshold(self):
-        BiometricVerificationConfig.similarity_threshold = 0.68
+    def test_default_threshold_is_fixed_similarity_value(self):
+        # §6.1: the similarity-scale default (0.32), not derived from any
+        # legacy config — biometric never imports biometric_verification.
         provider = DeepFaceProvider()
         self.assertAlmostEqual(provider.default_threshold, 0.32, places=6)
 
-        BiometricVerificationConfig.similarity_threshold = 0.75
-        self.assertAlmostEqual(provider.default_threshold, 0.25, places=6)
+    def test_default_threshold_configurable_per_instance(self):
+        provider = DeepFaceProvider(default_threshold=0.5)
+        self.assertAlmostEqual(provider.default_threshold, 0.5, places=6)
 
     def test_distance_matches_legacy_cosine_distance(self):
         provider = DeepFaceProvider()

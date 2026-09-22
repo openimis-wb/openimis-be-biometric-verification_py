@@ -17,31 +17,6 @@ DEFAULT_CFG = {
     # WebSocket streaming settings
     "sampling_interval_seconds": 5,  # Time between verifications (5 sec = 12 verifs/min)
     "websocket_auth_tokens": [],     # Optional list of auth tokens; empty = public access
-
-    # --- Multimodal identity + deduplication seam (docs/wb-biometric-dedup-seam.md §3.2) ---
-    "subject_model": "individual.Individual",
-    "modalities": {
-        # 0.32 is 1.0 - similarity_threshold (0.68): the legacy insuree flow's
-        # 0.68 is a cosine DISTANCE cutoff (verified when distance <= 0.68);
-        # this new path scores SIMILARITY (verified when similarity >= threshold),
-        # so the same operating point is 1.0 - 0.68 = 0.32 here.
-        "face": {"provider": "deepface", "threshold": 0.32},
-        "fingerprint": {"provider": "device_reported", "threshold": 48},
-    },
-    "vector_index": "numpy",  # "numpy" | "pgvector" (pgvector only if importable)
-    "template_key": None,     # Fernet key; templates/vectors encrypted at rest when set
-    "require_consent": False,
-    "dedup_threshold": {"face": 0.62},  # similarity (not distance) at/above which a candidate is emitted
-    "fusion": {
-        "weights": {"face": 1.0},
-        "thresholds": {"accept": 0.7, "review": 0.6},
-        "floors": {},
-        "floor_decision": "review",
-    },
-    "gql_biometric_enrol_perms": ["174001"],
-    "gql_biometric_verify_perms": ["174002"],
-    "gql_biometric_identify_perms": ["174003"],
-    "gql_biometric_read_perms": ["174004"],
 }
 
 # Maps uppercase Django settings keys → lowercase ModuleConfiguration keys.
@@ -57,17 +32,6 @@ _SETTINGS_KEY_MAP = {
     "GQL_MUTATION_COMPUTE_EMBEDDING_PERMS": "gql_mutation_compute_embedding_perms",
     "SAMPLING_INTERVAL_SECONDS": "sampling_interval_seconds",
     "WEBSOCKET_AUTH_TOKENS": "websocket_auth_tokens",
-    "SUBJECT_MODEL": "subject_model",
-    "MODALITIES": "modalities",
-    "VECTOR_INDEX": "vector_index",
-    "TEMPLATE_KEY": "template_key",
-    "REQUIRE_CONSENT": "require_consent",
-    "DEDUP_THRESHOLD": "dedup_threshold",
-    "FUSION": "fusion",
-    "GQL_BIOMETRIC_ENROL_PERMS": "gql_biometric_enrol_perms",
-    "GQL_BIOMETRIC_VERIFY_PERMS": "gql_biometric_verify_perms",
-    "GQL_BIOMETRIC_IDENTIFY_PERMS": "gql_biometric_identify_perms",
-    "GQL_BIOMETRIC_READ_PERMS": "gql_biometric_read_perms",
 }
 
 
@@ -103,28 +67,6 @@ class BiometricVerificationConfig(AppConfig):
     sampling_interval_seconds = 5
     websocket_auth_tokens = []
 
-    # Multimodal identity + deduplication seam
-    subject_model = "individual.Individual"
-    modalities = {
-        # See DEFAULT_CFG above: 0.32 = 1.0 - similarity_threshold (a distance cutoff).
-        "face": {"provider": "deepface", "threshold": 0.32},
-        "fingerprint": {"provider": "device_reported", "threshold": 48},
-    }
-    vector_index = "numpy"
-    template_key = None
-    require_consent = False
-    dedup_threshold = {"face": 0.62}
-    fusion = {
-        "weights": {"face": 1.0},
-        "thresholds": {"accept": 0.7, "review": 0.6},
-        "floors": {},
-        "floor_decision": "review",
-    }
-    gql_biometric_enrol_perms = ["174001"]
-    gql_biometric_verify_perms = ["174002"]
-    gql_biometric_identify_perms = ["174003"]
-    gql_biometric_read_perms = ["174004"]
-
     def __load_config(self, cfg):
         for field, value in cfg.items():
             if hasattr(BiometricVerificationConfig, field):
@@ -152,16 +94,3 @@ class BiometricVerificationConfig(AppConfig):
 
         # 4. Register Django signals for automatic claim risk score updates
         from . import signals  # noqa: F401
-
-        # 5. Register this module's candidate source with the deduplication
-        #    module, if installed (docs/wb-biometric-dedup-seam.md §2.1).
-        self._register_candidate_source()
-
-    @staticmethod
-    def _register_candidate_source():
-        try:
-            from deduplication.sources import register
-        except ImportError:
-            return
-        from .dedup_source import BiometricCandidateSource
-        register(BiometricCandidateSource())

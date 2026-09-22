@@ -1,13 +1,13 @@
 from django.core.management.base import BaseCommand
 
-from biometric_verification.services import purge
+from biometric.services import purge
 
 
 class Command(BaseCommand):
     help = (
-        "Erase biometric templates past BiometricRetentionPolicy."
-        "template_retention_days. No-op unless the policy has purge_enabled "
-        "and a retention window set."
+        "Erase biometric templates past BiometricRetentionPolicy's retention "
+        "windows. No-op unless the policy has purge_enabled (superseded "
+        "templates) or purge_active_enabled (active templates) set."
     )
 
     def add_arguments(self, parser):

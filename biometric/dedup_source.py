@@ -58,11 +58,11 @@ class BiometricCandidateSource(CandidateSource):
         self.modality = modality
 
     def scan(self, since: "Optional[Watermark]" = None):
-        from .apps import BiometricVerificationConfig
+        from .apps import BiometricConfig
         from .models import BiometricTemplate
         from .services import identify
 
-        threshold = BiometricVerificationConfig.dedup_threshold.get(self.modality, 0.0)
+        threshold = BiometricConfig.dedup_threshold.get(self.modality, 0.0)
 
         queryset = BiometricTemplate.objects.filter(
             modality=self.modality, validity_to__isnull=True,
@@ -79,7 +79,7 @@ class BiometricCandidateSource(CandidateSource):
             probe_template = template.template
             if template.encrypted:
                 from . import crypto
-                key = BiometricVerificationConfig.template_key
+                key = BiometricConfig.template_key
                 probe_vector = crypto.decrypt_vector(probe_vector, key)
                 probe_template = crypto.decrypt_bytes(probe_template, key)
 

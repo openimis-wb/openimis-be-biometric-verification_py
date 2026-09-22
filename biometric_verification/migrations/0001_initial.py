@@ -4,41 +4,33 @@ from django.db import migrations, models
 import django.db.models.deletion
 import uuid
 
-from biometric_verification.legacy import HAS_INSUREE
-
 
 class Migration(migrations.Migration):
 
     initial = True
 
-    # No-op when the insuree app isn't installed in this assembly (e.g. social
-    # protection): BiometricEmbedding FKs to insuree.Insuree.
-    dependencies = (
-        [('insuree', '0023_alter_family_head_insuree')] if HAS_INSUREE else []
-    )
+    dependencies = [
+        ('insuree', '0023_alter_family_head_insuree'),
+    ]
 
-    operations = (
-        [
-            migrations.CreateModel(
-                name='BiometricEmbedding',
-                fields=[
-                    ('id', models.AutoField(primary_key=True, serialize=False)),
-                    ('uuid', models.UUIDField(db_index=True, default=uuid.uuid4, editable=False, unique=True)),
-                    ('embedding', models.JSONField(help_text='Float vector produced by the face recognition model.')),
-                    ('model_name', models.CharField(help_text='Model used to compute the embedding (e.g. ArcFace, Facenet512).', max_length=64)),
-                    ('provider', models.CharField(help_text='Provider that computed the embedding (e.g. deepface, aws_rekognition).', max_length=64)),
-                    ('computed_at', models.DateTimeField(auto_now=True, help_text='Last time this embedding was (re)computed.')),
-                    ('validity_from', models.DateTimeField(auto_now_add=True, help_text='When this embedding became active.')),
-                    ('validity_to', models.DateTimeField(blank=True, db_index=True, help_text='When this embedding was superseded or invalidated. NULL = active.', null=True)),
-                    ('insuree', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='biometric_embedding', to='insuree.insuree')),
-                ],
-                options={
-                    'verbose_name': 'Biometric Embedding',
-                    'verbose_name_plural': 'Biometric Embeddings',
-                    'db_table': 'biometric_embedding',
-                },
-            ),
-        ]
-        if HAS_INSUREE
-        else []
-    )
+    operations = [
+        migrations.CreateModel(
+            name='BiometricEmbedding',
+            fields=[
+                ('id', models.AutoField(primary_key=True, serialize=False)),
+                ('uuid', models.UUIDField(db_index=True, default=uuid.uuid4, editable=False, unique=True)),
+                ('embedding', models.JSONField(help_text='Float vector produced by the face recognition model.')),
+                ('model_name', models.CharField(help_text='Model used to compute the embedding (e.g. ArcFace, Facenet512).', max_length=64)),
+                ('provider', models.CharField(help_text='Provider that computed the embedding (e.g. deepface, aws_rekognition).', max_length=64)),
+                ('computed_at', models.DateTimeField(auto_now=True, help_text='Last time this embedding was (re)computed.')),
+                ('validity_from', models.DateTimeField(auto_now_add=True, help_text='When this embedding became active.')),
+                ('validity_to', models.DateTimeField(blank=True, db_index=True, help_text='When this embedding was superseded or invalidated. NULL = active.', null=True)),
+                ('insuree', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='biometric_embedding', to='insuree.insuree')),
+            ],
+            options={
+                'verbose_name': 'Biometric Embedding',
+                'verbose_name_plural': 'Biometric Embeddings',
+                'db_table': 'biometric_embedding',
+            },
+        ),
+    ]
