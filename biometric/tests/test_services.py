@@ -252,11 +252,19 @@ class TestIdentify(_MultimodalServiceTestCase):
     def test_pgvector_without_app_installed_raises_improperly_configured(self):
         # §6.2: the biometric_pgvector app is the gate, not the pgvector
         # package — ImproperlyConfigured is raised before any import attempt.
+        # apps.is_installed is mocked rather than relied on ambiently, so this
+        # holds both where biometric_pgvector is absent and where it is
+        # actually installed (the pgvector test run — see biometric_pgvector's
+        # own tests for the "installed" behaviour).
+        from unittest.mock import patch
+
+        from django.apps import apps as django_apps
         from django.core.exceptions import ImproperlyConfigured
 
         BiometricConfig.vector_index = "pgvector"
-        with self.assertRaises(ImproperlyConfigured):
-            identify("face", vector=[1.0, 0.0])
+        with patch.object(django_apps, "is_installed", return_value=False):
+            with self.assertRaises(ImproperlyConfigured):
+                identify("face", vector=[1.0, 0.0])
 
 
 class TestFuse(SimpleTestCase):

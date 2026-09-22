@@ -80,11 +80,15 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     )
 
     now = timezone.now()
-    BiometricTemplate.objects.filter(
+    # Superseded row-by-row (not a queryset .update()) so post_save fires for
+    # each one — biometric_pgvector relies on it to drop the stale side row.
+    for stale in BiometricTemplate.objects.filter(
         subject_model=subject_model, subject_id=subject_id, modality=modality,
         position=position, provider=provider.provider_name, model_name=model_name,
         validity_to__isnull=True,
-    ).update(validity_to=now)
+    ):
+        stale.validity_to = now
+        stale.save(update_fields=["validity_to"])
 
     return BiometricTemplate.objects.create(
         subject_model=subject_model, subject_id=subject_id, modality=modality,
@@ -234,10 +238,18 @@ def _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subj
 
 def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_subject):
     """
-    VECTOR_INDEX == "pgvector" path: delegated to the optional biometric_pgvector
-    app (docs/wb-biometric-dedup-seam.md §6.2). Refuses before importing the
-    pgvector package — the app, not the package, is the gate.
+    VECTOR_INDEX == "pgvector" path: queries biometric_pgvector's side table
+    (docs/wb-biometric-dedup-seam.md §6.2). Refuses before importing anything
+    from that app or the pgvector package — the app, not the package, is the
+    gate, so this stays importable when biometric_pgvector is not installed.
+
+    Same cast expression as the partial HNSW index
+    (embedding::vector(N)) vector_cosine_ops, so the planner can use it once
+    biometric_vector_index --model --dim has created one; falls back to an
+    exact sequential scan otherwise. similarity = 1 - cosine distance.
     """
+    import json
+
     from django.apps import apps
     from django.core.exceptions import ImproperlyConfigured
 
@@ -246,10 +258,52 @@ def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_s
             "BIOMETRIC['VECTOR_INDEX'] is 'pgvector' but the 'biometric_pgvector' "
             "app is not installed."
         )
-    raise NotImplementedError(
-        "pgvector identify path is implemented by the biometric_pgvector app "
-        "(docs/wb-biometric-dedup-seam.md §6.2)."
-    )
+
+    from django.db import connection, transaction
+
+    from biometric_pgvector.config import hnsw_ef_search
+
+    model_name = getattr(provider, "model_name", "")
+    dim = len(probe_vector)
+    probe_literal = "[" + ",".join(repr(float(x)) for x in probe_vector) + "]"
+
+    where = [
+        "bvi.modality = %s", "bvi.provider = %s", "bvi.model_name = %s",
+        "bt.validity_to IS NULL",
+    ]
+    params = [modality, provider.provider_name, model_name]
+
+    if exclude_subject is not None:
+        where.append("bt.subject_id != %s")
+        params.append(str(exclude_subject))
+
+    if scope:
+        for key, value in scope.items():
+            where.append("bt.metadata @> %s::jsonb")
+            params.append(json.dumps({key: value}))
+
+    where_sql = " AND ".join(where)
+    sql = f"""
+        SELECT bt.subject_model, bt.subject_id, bvi.template_id,
+               1 - ((bvi.embedding::vector({dim})) <=> %s::vector({dim})) AS score
+        FROM biometric_vector_index bvi
+        JOIN biometric_template bt ON bt.id = bvi.template_id
+        WHERE {where_sql}
+        ORDER BY (bvi.embedding::vector({dim})) <=> %s::vector({dim})
+        LIMIT %s
+    """
+
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            # hnsw.ef_search takes a plain literal, not a bind parameter.
+            cursor.execute(f"SET LOCAL hnsw.ef_search = {int(hnsw_ef_search())}")
+            cursor.execute(sql, [probe_literal, *params, probe_literal, top_k])
+            rows = cursor.fetchall()
+
+    return [
+        Match(subject_model=subject_model, subject_id=subject_id, template_id=str(template_id), score=float(score))
+        for subject_model, subject_id, template_id, score in rows
+    ]
 
 
 def _identify_template(provider, modality, probe_template, top_k, scope, exclude_subject):

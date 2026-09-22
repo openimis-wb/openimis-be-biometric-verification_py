@@ -1,17 +1,20 @@
 # openimis-be-biometric_verification
 
-This distribution ships **two independent Django apps**:
+This distribution ships **three independent Django apps**:
 
 | App | Assembly | Subject | What it does |
 |---|---|---|---|
 | `biometric` | Any (social protection, generic) | `(subject_model, subject_id)`, e.g. `"individual.Individual"` | Multimodal identity: enrol/verify/identify across face, fingerprint, voice, iris, palmvein; deduplication candidate source |
+| `biometric_pgvector` | Optional, on top of `biometric` | — (indexes `biometric.BiometricTemplate`) | Postgres `pgvector` ANN index for `identify()`, for galleries too large for the NumPy path |
 | `biometric_verification` | Health only | `insuree.Insuree` / `claim.Claim` | Legacy 1:1 face verification at point of service, claim facial-audit trail |
 
-They do not import each other. An assembly installs the app(s) matching what
-it has: `biometric` needs nothing beyond `openimis-be-core`; `biometric_verification`
+None of them import each other at module import time. An assembly installs
+the app(s) matching what it has: `biometric` needs nothing beyond
+`openimis-be-core`; `biometric_pgvector` needs `biometric` installed and a
+Postgres server with the `vector` extension available; `biometric_verification`
 needs `insuree` and `claim` installed (its models FK to them unconditionally).
-A health assembly with both social-protection and health features can install
-both apps side by side.
+A health assembly with social-protection features can install any combination
+of the three side by side.
 
 ---
 
@@ -147,6 +150,84 @@ This app registers a `BiometricCandidateSource` (kind `"biometric"`) with
 `try/except ImportError` — the deduplication package is optional. It scans
 active templates for one modality, runs `identify()` against the rest of the
 gallery, and yields a candidate per match at or above `DEDUP_THRESHOLD`.
+
+---
+
+## `biometric_pgvector` — pgvector ANN index (optional)
+
+`biometric.services.identify()`'s default gallery search is one NumPy matrix
+product over every active embedding template — exact, and fine up to a
+gallery of a few hundred thousand rows. Past that, install `biometric_pgvector`
+and set `BIOMETRIC["VECTOR_INDEX"] = "pgvector"` to search an
+[HNSW](https://github.com/pgvector/pgvector#hnsw) approximate index in
+Postgres instead. Without this app installed, `identify()` raises
+`ImproperlyConfigured` as soon as `VECTOR_INDEX` is set to `"pgvector"`.
+
+### When to install it
+
+- A gallery large enough that the NumPy path's per-call full scan is too slow
+  (deduplication scans and identify-on-enrol calls both re-run it).
+- A Postgres server that has the `vector` extension available — the first
+  migration runs `CREATE EXTENSION IF NOT EXISTS vector`, which needs
+  superuser (or a role pre-granted `CREATEDB`/extension rights).
+- **Not** a fit when `BIOMETRIC["TEMPLATE_KEY"]` is set and plaintext vectors
+  must never leave the encrypted store — see the trade-off below.
+
+### Quick start
+
+```bash
+pip install "openimis-be-biometric_verification[pgvector]"
+```
+
+Add to `openimis.json`, after `biometric`:
+```json
+{
+  "modules": ["biometric", "biometric_pgvector"]
+}
+```
+
+Run migrations (creates the `vector` extension and `biometric_vector_index`):
+```bash
+python manage.py migrate biometric_pgvector
+```
+
+Set `BIOMETRIC["VECTOR_INDEX"] = "pgvector"`.
+
+### The two commands
+
+- `python manage.py biometric_vector_reindex` — backfills
+  `biometric_vector_index` from every `biometric_template` row (fresh install,
+  or after data loaded without going through the ORM's signals). Safe to
+  re-run; also drops side rows for templates that should no longer have one.
+- `python manage.py biometric_vector_index --model NAME --dim N [--drop]` —
+  creates (or, with `--drop`, removes) a partial HNSW index for one
+  `model_name` at a fixed vector dimension:
+  ```sql
+  CREATE INDEX IF NOT EXISTS <name> ON biometric_vector_index
+    USING hnsw ((embedding::vector(N)) vector_cosine_ops)
+    WHERE model_name = 'NAME'
+  ```
+  Run once per `(model_name, dim)` pair actually enrolled — the cast and the
+  `WHERE` clause must match `identify()`'s query exactly for the planner to
+  use the index. `BIOMETRIC["HNSW_EF_SEARCH"]` (default `200`) controls the
+  search-time accuracy/speed trade-off (`SET LOCAL hnsw.ef_search`).
+
+Day to day, `biometric_vector_index` stays in sync on its own: `enrol()`,
+`consolidate()`, and template deletion all fire `BiometricTemplate`
+`post_save`/`post_delete`, which `biometric_pgvector` uses to upsert or drop
+the corresponding side row — nothing needs to be re-run after normal use.
+
+### The plaintext trade-off
+
+**An ANN index cannot search encrypted vectors.** `biometric_vector_index`
+always stores the embedding in clear, decrypted from `biometric_template` at
+sync time, regardless of `BIOMETRIC["TEMPLATE_KEY"]`. If a key is set —
+templates are meant to be encrypted at rest — installing this app would
+silently defeat that guarantee, so `biometric_pgvector` refuses to start
+(`ImproperlyConfigured` at `AppConfig.ready()`) unless
+`BIOMETRIC["ALLOW_PLAINTEXT_INDEX"] = True` is set as an explicit,
+deliberate opt-in. There is no partial middle ground: either encryption at
+rest covers every stored vector, or this index's rows are the exception.
 
 ---
 
