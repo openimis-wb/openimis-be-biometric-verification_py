@@ -249,11 +249,14 @@ class TestIdentify(_MultimodalServiceTestCase):
         self.assertTrue(called.get("hit"))
         self.assertEqual(result, [])
 
-    def test_pgvector_path_lazily_imports_and_fails_when_unavailable(self):
-        # pgvector is not installed in this environment — confirms the import
-        # is deferred to the point of use, not paid by every identify() call.
+    def test_pgvector_path_defers_its_import_to_point_of_use(self):
+        # Confirms _identify_pgvector's `import pgvector` is not paid by every
+        # identify() call — only by one actually routed to the pgvector path.
+        # Raises ImportError where the package is absent (this environment) or
+        # NotImplementedError where it's present but the vector column isn't
+        # provisioned (see services._identify_pgvector) — either is correct.
         BiometricVerificationConfig.vector_index = "pgvector"
-        with self.assertRaises(ImportError):
+        with self.assertRaises((ImportError, NotImplementedError)):
             identify("face", vector=[1.0, 0.0])
 
 

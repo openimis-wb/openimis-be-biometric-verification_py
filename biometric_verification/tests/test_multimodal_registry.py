@@ -9,8 +9,24 @@ is unaffected.
 from django.test import SimpleTestCase
 
 from biometric_verification.apps import BiometricVerificationConfig
-from biometric_verification.providers.base import EmbeddingProvider, Extracted, MatcherProvider
+from biometric_verification.providers.base import (
+    BaseBiometricProvider,
+    EmbeddingProvider,
+    Extracted,
+    MatcherProvider,
+    VerificationResult,
+)
 from biometric_verification.registry import ProviderRegistry
+
+
+class _LegacyStubProvider(BaseBiometricProvider):
+    provider_name = "legacy-stub"
+
+    def verify(self, probe_image, reference_image, threshold=None):
+        return VerificationResult(verified=True, provider=self.provider_name)
+
+    def get_embedding(self, image):
+        return [0.1, 0.2]
 
 
 class _AlphaEmbedding(EmbeddingProvider):
@@ -128,3 +144,43 @@ class TestBuiltinModalityRegistrations(SimpleTestCase):
         except ImportError:
             self.skipTest("deepface not installed")
         self.assertIn(("face", "deepface"), ProviderRegistry._modality_registry)
+
+
+class TestLegacyGetActiveProviderUnchanged(SimpleTestCase):
+    """
+    §3.7: "legacy get_active_provider unchanged". The pre-existing
+    test_registry.py exercises this via @patch("...registry.BiometricVerificationConfig"),
+    which fails because get_active_provider() imports it locally (unrelated to
+    this branch's changes — see the final report). This test proves the same
+    behaviour by setting the real config class attribute directly instead.
+    """
+
+    def setUp(self):
+        self._registry = dict(ProviderRegistry._registry)
+        self._instances = dict(ProviderRegistry._instances)
+        self._provider = BiometricVerificationConfig.provider
+        self._provider_config = BiometricVerificationConfig.provider_config
+
+    def tearDown(self):
+        ProviderRegistry._registry.clear()
+        ProviderRegistry._instances.clear()
+        ProviderRegistry._registry.update(self._registry)
+        ProviderRegistry._instances.update(self._instances)
+        BiometricVerificationConfig.provider = self._provider
+        BiometricVerificationConfig.provider_config = self._provider_config
+
+    def test_returns_cached_instance_for_configured_provider(self):
+        ProviderRegistry.register("legacy-stub", _LegacyStubProvider)
+        BiometricVerificationConfig.provider = "legacy-stub"
+        BiometricVerificationConfig.provider_config = {}
+
+        p1 = ProviderRegistry.get_active_provider()
+        p2 = ProviderRegistry.get_active_provider()
+
+        self.assertIsInstance(p1, _LegacyStubProvider)
+        self.assertIs(p1, p2)
+
+    def test_unknown_provider_still_raises_key_error(self):
+        BiometricVerificationConfig.provider = "nonexistent-legacy-provider"
+        with self.assertRaises(KeyError):
+            ProviderRegistry.get_active_provider()

@@ -20,6 +20,8 @@ setup(
         'djangorestframework',
         'graphene-django',
         'openimis-be-core',
+        'cryptography',
+        'numpy',
     ],
     extras_require={
         # Local inference — pip install "openimis-be-biometric_verification[deepface]"
