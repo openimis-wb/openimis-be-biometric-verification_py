@@ -2,6 +2,8 @@
 
 from django.db import migrations, models
 
+from biometric_verification.legacy import HAS_INSUREE
+
 
 class Migration(migrations.Migration):
 
@@ -9,10 +11,15 @@ class Migration(migrations.Migration):
         ('biometric_verification', '0003_add_embedding_metadata'),
     ]
 
-    operations = [
-        migrations.AddField(
-            model_name='biometricembedding',
-            name='metadata',
-            field=models.JSONField(blank=True, default=dict, help_text='Complete configuration used to compute this embedding (detector_backend, enforce_detection, etc.).'),
-        ),
-    ]
+    # No-op when insuree isn't installed: BiometricEmbedding doesn't exist (0001 was a no-op).
+    operations = (
+        [
+            migrations.AddField(
+                model_name='biometricembedding',
+                name='metadata',
+                field=models.JSONField(blank=True, default=dict, help_text='Complete configuration used to compute this embedding (detector_backend, enforce_detection, etc.).'),
+            ),
+        ]
+        if HAS_INSUREE
+        else []
+    )
