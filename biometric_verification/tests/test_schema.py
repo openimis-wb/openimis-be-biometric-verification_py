@@ -74,14 +74,22 @@ class TestVerifyFaceMutation(SimpleTestCase):
 
     # --- permission guard ---
 
-    def test_anonymous_user_raises_permission_denied(self):
-        with self.assertRaises(PermissionDenied):
-            VerifyFaceMutation.mutate(
-                None,
-                _make_info(_anon_user()),
-                insuree_uuid="some-uuid",
-                frame_b64="abc123",
-            )
+    @patch("biometric_verification.services.BiometricService")
+    def test_anonymous_user_calls_service(self, mock_service):
+        # verifyFace is whitelisted in JWT_ALLOW_ANY_CLASSES (see schema.py
+        # mutate() and apps.py _PUBLIC_MUTATIONS) for the public kiosk page —
+        # anonymous callers are let through, unlike ComputeInsureeEmbeddingMutation.
+        mock_service.verify_face.return_value = _mock_verify_result()
+
+        result = VerifyFaceMutation.mutate(
+            None,
+            _make_info(_anon_user()),
+            uuid="some-uuid",
+            frame="abc123",
+        )
+
+        mock_service.verify_face.assert_called_once()
+        self.assertTrue(result.verified)
 
     @patch("biometric_verification.schema.BiometricVerificationConfig")
     @patch("biometric_verification.services.BiometricService")
@@ -95,8 +103,8 @@ class TestVerifyFaceMutation(SimpleTestCase):
         result = VerifyFaceMutation.mutate(
             None,
             _make_info(user),
-            insuree_uuid="insuree-uuid",
-            frame_b64="abc123",
+            uuid="insuree-uuid",
+            frame="abc123",
         )
 
         mock_service.verify_face.assert_called_once_with(
@@ -118,8 +126,8 @@ class TestVerifyFaceMutation(SimpleTestCase):
         result = VerifyFaceMutation.mutate(
             None,
             _make_info(user),
-            insuree_uuid="insuree-uuid",
-            frame_b64="abc123",
+            uuid="insuree-uuid",
+            frame="abc123",
         )
 
         user.has_perms.assert_called_once_with(["biometric.verify"])
@@ -135,8 +143,8 @@ class TestVerifyFaceMutation(SimpleTestCase):
             VerifyFaceMutation.mutate(
                 None,
                 _make_info(user),
-                insuree_uuid="insuree-uuid",
-                frame_b64="abc123",
+                uuid="insuree-uuid",
+                frame="abc123",
             )
 
     # --- result forwarding ---
@@ -152,8 +160,8 @@ class TestVerifyFaceMutation(SimpleTestCase):
         result = VerifyFaceMutation.mutate(
             None,
             _make_info(_auth_user()),
-            insuree_uuid="bad-uuid",
-            frame_b64="abc123",
+            uuid="bad-uuid",
+            frame="abc123",
         )
 
         self.assertFalse(result.verified)
@@ -265,8 +273,8 @@ class TestClaimFacialAuditsQuery(SimpleTestCase):
                 claim_uuid="some-uuid",
             )
 
-    @patch("biometric_verification.schema.ClaimFacialAudit")
-    @patch("biometric_verification.schema.Claim")
+    @patch("biometric_verification.models.ClaimFacialAudit")
+    @patch("claim.models.Claim")
     def test_authenticated_user_returns_audits(self, mock_claim_model, mock_audit_model):
         """Authenticated users should receive the list of facial audits."""
         # Mock claim
@@ -315,7 +323,7 @@ class TestClaimFacialAuditsQuery(SimpleTestCase):
         self.assertEqual(result[0].step_name, "reception")
         self.assertTrue(result[0].is_verified)
 
-    @patch("biometric_verification.schema.Claim")
+    @patch("claim.models.Claim")
     def test_claim_not_found_raises_value_error(self, mock_claim_model):
         """Should raise ValueError when claim doesn't exist."""
         # Create a custom exception class for DoesNotExist

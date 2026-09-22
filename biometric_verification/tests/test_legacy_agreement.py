@@ -56,11 +56,18 @@ class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
             LegacyDeepFaceProvider, "get_embedding", return_value=self.PROBE_VECTOR,
         )
         self._get_embedding_patch.start()
+        # New path computes the probe embedding via extract() -> _get_embedding();
+        # stub it too so verify() doesn't need a real DeepFace install.
+        self._new_get_embedding_patch = patch.object(
+            NewDeepFaceProvider, "_get_embedding", return_value=self.PROBE_VECTOR,
+        )
+        self._new_get_embedding_patch.start()
 
     def tearDown(self):
         from biometric.registry import ProviderRegistry
 
         self._get_embedding_patch.stop()
+        self._new_get_embedding_patch.stop()
         self._BiometricVerificationConfig.similarity_threshold = self._legacy_threshold
         self._BiometricConfig.modalities = self._modalities
         ProviderRegistry._modality_registry.clear()
