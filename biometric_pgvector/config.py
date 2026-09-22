@@ -1,8 +1,6 @@
 """
-Reads the BIOMETRIC config keys that belong to this app but that
-biometric.apps.BiometricConfig does not register in its DEFAULT_CFG —
-ALLOW_PLAINTEXT_INDEX and HNSW_EF_SEARCH (docs/wb-biometric-dedup-seam.md
-§6.2). Same source and override order as BiometricConfig.ready() (the
+Reads the BIOMETRIC config keys this app depends on — ALLOW_PLAINTEXT_INDEX,
+HNSW_EF_SEARCH and TEMPLATE_KEY (docs/wb-biometric-dedup-seam.md §6.2). Same source and override order as BiometricConfig.ready() (the
 "biometric" ModuleConfiguration row, then django.conf.settings.BIOMETRIC),
 replicated here rather than added to biometric/apps.py.
 """
@@ -16,6 +14,13 @@ def _raw_biometric_cfg():
     for key, value in (getattr(settings, "BIOMETRIC", {}) or {}).items():
         cfg[key.lower()] = value
     return cfg
+
+
+def template_key():
+    """The encryption key, read from the configuration source itself rather than
+    from BiometricConfig, so the answer does not depend on which app's ready()
+    ran first."""
+    return _raw_biometric_cfg().get("template_key")
 
 
 def allow_plaintext_index():

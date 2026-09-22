@@ -13,29 +13,30 @@ from django.test import SimpleTestCase
 from biometric.apps import BiometricConfig
 from biometric_pgvector.apps import BiometricPgvectorConfig
 
+RAW_CFG = "biometric_pgvector.config._raw_biometric_cfg"
+
 
 class TestPlaintextGuard(SimpleTestCase):
 
-    def setUp(self):
-        super().setUp()
-        self._template_key = BiometricConfig.template_key
-
-    def tearDown(self):
-        super().tearDown()
-        BiometricConfig.template_key = self._template_key
-
     def test_raises_when_template_key_set_and_plaintext_not_allowed(self):
-        BiometricConfig.template_key = "a-fernet-key"
-        with patch("biometric_pgvector.config.allow_plaintext_index", return_value=False):
+        with patch(RAW_CFG, return_value={"template_key": "a-fernet-key"}):
             with self.assertRaises(ImproperlyConfigured):
                 BiometricPgvectorConfig._guard_plaintext_index()
 
     def test_passes_when_template_key_set_and_plaintext_allowed(self):
-        BiometricConfig.template_key = "a-fernet-key"
-        with patch("biometric_pgvector.config.allow_plaintext_index", return_value=True):
+        cfg = {"template_key": "a-fernet-key", "allow_plaintext_index": True}
+        with patch(RAW_CFG, return_value=cfg):
             BiometricPgvectorConfig._guard_plaintext_index()
 
     def test_passes_when_no_template_key(self):
-        BiometricConfig.template_key = None
-        with patch("biometric_pgvector.config.allow_plaintext_index", return_value=False):
+        with patch(RAW_CFG, return_value={}):
             BiometricPgvectorConfig._guard_plaintext_index()
+
+    def test_raises_before_biometric_has_loaded_its_config(self):
+        """biometric_pgvector's ready() may run first when a manifest lists it
+        before biometric: BiometricConfig.template_key is then still None, and
+        the guard must still see the key in the configuration."""
+        with patch.object(BiometricConfig, "template_key", None), \
+                patch(RAW_CFG, return_value={"template_key": "a-fernet-key"}):
+            with self.assertRaises(ImproperlyConfigured):
+                BiometricPgvectorConfig._guard_plaintext_index()

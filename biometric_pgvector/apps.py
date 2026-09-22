@@ -20,19 +20,13 @@ class BiometricPgvectorConfig(AppConfig):
         Refuse to start when BIOMETRIC['TEMPLATE_KEY'] is set (templates are
         encrypted at rest) unless BIOMETRIC['ALLOW_PLAINTEXT_INDEX'] is True —
         an ANN index cannot search encrypted vectors, so this app always
-        stores them in clear (docs/wb-biometric-dedup-seam.md §6.2).
-
-        Reads biometric.apps.BiometricConfig.template_key rather than the raw
-        config: every manifest lists "biometric" before "biometric_pgvector"
-        (it is this app's own FK target), Django calls AppConfig.ready() in
-        INSTALLED_APPS order, so BiometricConfig.ready() has already loaded
-        template_key by the time this runs.
+        stores them in clear (docs/wb-biometric-dedup-seam.md §6.2). Both keys
+        are read from the configuration source, so the check holds whatever
+        order the manifest lists the apps in.
         """
-        from biometric.apps import BiometricConfig
+        from .config import allow_plaintext_index, template_key
 
-        from .config import allow_plaintext_index
-
-        if BiometricConfig.template_key is not None and not allow_plaintext_index():
+        if template_key() is not None and not allow_plaintext_index():
             raise ImproperlyConfigured(
                 "biometric_pgvector stores vectors in clear for ANN search, but "
                 "BIOMETRIC['TEMPLATE_KEY'] is set (templates are encrypted at "
