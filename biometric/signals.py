@@ -1,5 +1,6 @@
 """
-Deduplication seam (docs/wb-biometric-dedup-seam.md §2.2, §3.6).
+Deduplication seam (docs/wb-biometric-dedup-seam.md §2.2, §3.6) and the
+impersonation signal this module emits (§6.9).
 
 bind_service_signals() is auto-discovered and invoked by
 openIMIS/signal_binding/apps.py for every app in OPENIMIS_APPS. Binding
@@ -10,9 +11,65 @@ signal is only ever fired if that module later registers and emits it.
 import logging
 
 from core.service_signals import ServiceSignalBindType
-from core.signals import bind_service_signal
+from core.signals import bind_service_signal, register_service_signal
 
 logger = logging.getLogger(__name__)
+
+IMPERSONATION_SUSPECTED = "biometric.impersonation_suspected"
+
+
+class _ImpersonationSignalEmitter:
+    """
+    Registers biometric.impersonation_suspected when this module is imported.
+
+    Subscribers bind with ServiceSignalBindType.AFTER and read the payload
+    from kwargs["result"]; BEFORE receivers get no result. The payload keys
+    are verification_id, subject_model, subject_id, modality,
+    matched_subject_model, matched_subject_id, matched_template_id,
+    matched_score, claimed_score, threshold, margin, actor, device_id and
+    context. The payload names two subjects: a subscriber applies its own
+    access rights before exposing it.
+    """
+
+    @classmethod
+    @register_service_signal(IMPERSONATION_SUSPECTED)
+    def emit(cls, *, verification_id, subject_model, subject_id, modality, matched_subject_model,
+             matched_subject_id, matched_template_id, matched_score, claimed_score, threshold, margin,
+             actor, device_id, verification_context):
+        # The core wrapper pops a keyword named "context" for itself, so the
+        # verification context travels as verification_context.
+        return {
+            "verification_id": verification_id,
+            "subject_model": subject_model,
+            "subject_id": subject_id,
+            "modality": modality,
+            "matched_subject_model": matched_subject_model,
+            "matched_subject_id": matched_subject_id,
+            "matched_template_id": matched_template_id,
+            "matched_score": matched_score,
+            "claimed_score": claimed_score,
+            "threshold": threshold,
+            "margin": margin,
+            "actor": actor,
+            "device_id": device_id,
+            "context": verification_context,
+        }
+
+
+def emit_impersonation_suspected(**payload):
+    """
+    Fires biometric.impersonation_suspected with payload (keys as in
+    _ImpersonationSignalEmitter). Core service signals use Signal.send, so a
+    raising receiver propagates; it is logged here and never reaches verify().
+    """
+    try:
+        payload = dict(payload)
+        verification_context = payload.pop("context", None)
+        _ImpersonationSignalEmitter.emit(**payload, verification_context=verification_context)
+    except Exception:
+        logger.exception(
+            "%s: emitting failed for verification %s", IMPERSONATION_SUSPECTED, payload.get("verification_id"),
+        )
 
 
 def on_subject_merged(**kwargs):

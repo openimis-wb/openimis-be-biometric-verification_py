@@ -1,7 +1,7 @@
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -14,6 +14,26 @@ class VerificationResult:
     origin: Optional[str] = None
     threshold: Optional[float] = None
     error: Optional[str] = None
+    risk_profile: str = ""       # the named profile the threshold was resolved under, "" for the base
+    impersonation: Optional[Any] = None  # impersonation.ImpersonationProbe, None when the probe did not run
+
+
+@dataclass
+class FaceGeometry:
+    """
+    Where a provider found the face in the sample, read by the quality gate.
+
+    Coordinates are pixels of the sample as Pillow decodes it without EXIF
+    transpose: origin top-left, x to the right, y downwards.
+    - box: (x, y, width, height) of the detected face.
+    - landmarks: (x, y) per name; 'left_eye', 'right_eye', 'nose',
+      'mouth_left' and 'mouth_right' are read, other keys are ignored.
+    - pose: degrees, any subset of 'yaw', 'pitch', 'roll'; positive roll
+      turns the head clockwise in the image.
+    """
+    box: Optional[Tuple[float, float, float, float]] = None
+    landmarks: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    pose: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -24,6 +44,7 @@ class Extracted:
     template_iso: Optional[bytes] = None       # ISO/IEC 19794 where the SDK gives it
     quality: Optional[float] = None            # 0-100, NFIQ-like where applicable
     metadata: dict = field(default_factory=dict)
+    face: Optional[FaceGeometry] = None        # read by the quality gate, never stored
 
 
 class ModalityProvider(ABC):

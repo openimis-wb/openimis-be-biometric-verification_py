@@ -3,7 +3,9 @@ Unit tests for services.py's multimodal functions (§3.4, §3.7). Uses fake
 providers registered per test — no ML model is ever loaded.
 """
 
+import io
 from datetime import timedelta
+from unittest import skipUnless
 
 from cryptography.fernet import Fernet
 from django.db import IntegrityError, transaction
@@ -19,12 +21,16 @@ from biometric.models import (
     BiometricTemplate,
     BiometricVerification,
 )
-from biometric.providers.base import Extracted
+from biometric.dedup_source import BiometricCandidateSource
+from biometric.providers.base import Extracted, FaceGeometry
 from biometric.providers.device_reported import DeviceReportedMatcher
-from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
+from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider, _hash_to_vector
+from biometric.quality import pillow_available
 from biometric.registry import ProviderRegistry
 from biometric.services import (
     ConsentRequiredError,
+    QualityRefusedError,
+    UnknownRiskProfileError,
     consolidate,
     enrol,
     fuse,
@@ -50,6 +56,10 @@ class _MultimodalServiceTestCase(TestCase):
             "dedup_threshold": BiometricConfig.dedup_threshold,
             "fusion": BiometricConfig.fusion,
             "vector_index": BiometricConfig.vector_index,
+            "quality": BiometricConfig.quality,
+            "risk_profiles": BiometricConfig.risk_profiles,
+            "impersonation_probe": BiometricConfig.impersonation_probe,
+            "audit": BiometricConfig.audit,
         }
         self._registry_snapshot = dict(ProviderRegistry._modality_registry)
         self._instances_snapshot = dict(ProviderRegistry._modality_instances)
@@ -271,6 +281,8 @@ class TestFuse(SimpleTestCase):
 
     def setUp(self):
         self._modalities = BiometricConfig.modalities
+        self._risk_profiles = BiometricConfig.risk_profiles
+        self._fusion = BiometricConfig.fusion
         BiometricConfig.modalities = {
             "face": {"threshold": 0.7},
             "fingerprint": {"threshold": 50.0},
@@ -278,6 +290,8 @@ class TestFuse(SimpleTestCase):
 
     def tearDown(self):
         BiometricConfig.modalities = self._modalities
+        BiometricConfig.risk_profiles = self._risk_profiles
+        BiometricConfig.fusion = self._fusion
 
     def test_weighted_mean_normalised_to_threshold(self):
         # Both legs exactly at their threshold -> normalised score == 1.0 -> accept.
@@ -345,6 +359,168 @@ class TestFuse(SimpleTestCase):
             thresholds={"accept": 1.0, "review": 0.5},
         )
         self.assertAlmostEqual(decision.score, 1.0, places=5)
+
+
+class TestFuseRiskProfile(SimpleTestCase):
+    """fuse(risk_profile=...) — §6.8."""
+
+    PROFILES = {
+        "strict_accept": {"thresholds": {"accept": 1.2}},
+        "floor_reject": {"floors": {"fingerprint": 40.0}, "floor_decision": "reject"},
+        "needs_fingerprint": {"required": ["fingerprint"]},
+        "face_08": {"modality_thresholds": {"face": 0.8}},
+    }
+
+    def setUp(self):
+        self._snapshot = {
+            "modalities": BiometricConfig.modalities,
+            "fusion": BiometricConfig.fusion,
+            "risk_profiles": BiometricConfig.risk_profiles,
+        }
+        BiometricConfig.modalities = {
+            "face": {"threshold": 0.7},
+            "fingerprint": {"threshold": 50.0},
+        }
+        BiometricConfig.fusion = {
+            "weights": {"face": 1.0, "fingerprint": 1.0},
+            "thresholds": {"accept": 1.0, "review": 0.8},
+            "floors": {},
+            "floor_decision": "review",
+        }
+        BiometricConfig.risk_profiles = dict(self.PROFILES)
+
+    def tearDown(self):
+        for key, value in self._snapshot.items():
+            setattr(BiometricConfig, key, value)
+
+    def test_default_unchanged_none_empty_and_omitted_identical(self):
+        faces = [None, -0.2] + [i / 10 for i in range(11)]
+        fingerprints = [None] + [float(v) for v in range(0, 101, 10)]
+        for face in faces:
+            for fingerprint in fingerprints:
+                for required in (frozenset(), frozenset({"fingerprint"})):
+                    scores = {"face": face, "fingerprint": fingerprint}
+                    omitted = fuse(scores, required=required)
+                    self.assertEqual(omitted, fuse(scores, required=required, risk_profile=None))
+                    self.assertEqual(omitted, fuse(scores, required=required, risk_profile=""))
+                    self.assertEqual(omitted.risk_profile, "")
+
+    def test_raised_accept_turns_base_accept_into_review(self):
+        scores = {"face": 0.7, "fingerprint": 50.0}
+        self.assertEqual(fuse(scores).outcome, "accept")
+        self.assertEqual(fuse(scores, risk_profile="strict_accept").outcome, "review")
+
+    def test_profile_floor_with_reject_rejects(self):
+        scores = {"face": 0.7, "fingerprint": 35.0}   # (1.0 + 0.7) / 2 = 0.85 -> review
+        self.assertEqual(fuse(scores).outcome, "review")
+        decision = fuse(scores, risk_profile="floor_reject")
+        self.assertEqual(decision.outcome, "reject")
+        self.assertTrue(any("floor 40.0" in reason for reason in decision.reasons))
+
+    def test_profile_required_missing_leg_caps_at_review(self):
+        scores = {"face": 0.7, "fingerprint": None}
+        self.assertEqual(fuse(scores).outcome, "accept")
+        decision = fuse(scores, risk_profile="needs_fingerprint")
+        self.assertEqual(decision.outcome, "review")
+        self.assertTrue(any("fingerprint" in reason for reason in decision.reasons))
+
+    def test_modality_threshold_lowers_normalised_score(self):
+        BiometricConfig.fusion = {**BiometricConfig.fusion, "weights": {"face": 1.0}}
+        self.assertAlmostEqual(fuse({"face": 0.7}).score, 1.0, places=9)
+        decision = fuse({"face": 0.7}, risk_profile="face_08")
+        self.assertAlmostEqual(decision.score, 0.875, places=9)
+        self.assertEqual(decision.outcome, "review")
+
+    def test_raised_modality_threshold_never_lifts_a_negative_leg(self):
+        scores = {"face": -0.5, "fingerprint": 100.0}
+        base = fuse(scores)
+        profiled = fuse(scores, risk_profile="face_08")
+        self.assertAlmostEqual(profiled.score, base.score, places=9)
+
+    def test_decision_carries_profile_name(self):
+        decision = fuse({"face": 0.7, "fingerprint": 50.0}, risk_profile="needs_fingerprint")
+        self.assertEqual(decision.risk_profile, "needs_fingerprint")
+
+    def test_unknown_profile_raises_before_scoring(self):
+        with self.assertRaises(UnknownRiskProfileError):
+            fuse({}, risk_profile="nope")
+
+
+class TestVerifyRiskProfile(_MultimodalServiceTestCase):
+    """verify(risk_profile=...) — §6.8."""
+
+    def setUp(self):
+        super().setUp()
+        BiometricConfig.risk_profiles = {
+            "voice_strict": {"modality_thresholds": {"voice_device": 70}},
+            "fingerprint_floor": {"floors": {"fingerprint": 60.0}},
+        }
+
+    def test_profile_raises_threshold_and_is_recorded(self):
+        base_result = verify(SUBJECT_MODEL, "s1", "voice_device", device_score=60.0, actor="tester")
+        base_row = BiometricVerification.objects.get(subject_id="s1", risk_profile="")
+
+        self.assertTrue(base_result.verified)
+        self.assertEqual(base_row.threshold, 48)
+        self.assertEqual(base_result.risk_profile, "")
+
+        result = verify(
+            SUBJECT_MODEL, "s1", "voice_device", device_score=60.0, actor="tester", risk_profile="voice_strict",
+        )
+        row = BiometricVerification.objects.get(subject_id="s1", risk_profile="voice_strict")
+
+        self.assertFalse(result.verified)
+        self.assertFalse(row.verified)
+        self.assertEqual(row.threshold, 70)
+        self.assertEqual(result.threshold, 70)
+        self.assertEqual(result.risk_profile, "voice_strict")
+
+    def test_server_path_uses_profile_threshold(self):
+        provider = FakeEmbeddingProvider()
+        reference = provider.extract(b"reference-photo").vector
+        base_threshold = BiometricConfig.modalities["face"]["threshold"]
+        probe, similarity = next(
+            (candidate, provider.similarity(provider.extract(candidate).vector, reference))
+            for candidate in (f"probe-{i}".encode() for i in range(1000))
+            if base_threshold + 0.01 < provider.similarity(provider.extract(candidate).vector, reference) < 0.99
+        )
+        profile_threshold = (similarity + 1.0) / 2
+        BiometricConfig.risk_profiles = {"face_strict": {"modality_thresholds": {"face": profile_threshold}}}
+        enrol(SUBJECT_MODEL, "s1", "face", b"reference-photo", actor="tester")
+
+        base_result = verify(SUBJECT_MODEL, "s1", "face", sample=probe, actor="tester")
+        result = verify(SUBJECT_MODEL, "s1", "face", sample=probe, actor="tester", risk_profile="face_strict")
+
+        self.assertTrue(base_result.verified)
+        self.assertAlmostEqual(base_result.confidence, similarity, places=9)
+        self.assertFalse(result.verified)
+        self.assertAlmostEqual(result.confidence, similarity, places=9)
+        row = BiometricVerification.objects.get(subject_id="s1", risk_profile="face_strict")
+        self.assertAlmostEqual(row.threshold, profile_threshold, places=9)
+
+    def test_profile_not_touching_modality_keeps_threshold_but_records_name(self):
+        result = verify(
+            SUBJECT_MODEL, "s1", "voice_device", device_score=60.0, actor="tester",
+            risk_profile="fingerprint_floor",
+        )
+        row = BiometricVerification.objects.get(subject_id="s1")
+
+        self.assertTrue(result.verified)
+        self.assertEqual(row.threshold, 48)
+        self.assertEqual(row.risk_profile, "fingerprint_floor")
+
+    def test_unknown_profile_raises_writes_no_row_and_never_extracts(self):
+        from unittest.mock import patch
+
+        with patch.object(FakeEmbeddingProvider, "extract") as extract:
+            with self.assertRaises(UnknownRiskProfileError):
+                verify(SUBJECT_MODEL, "s1", "face", sample=b"probe", actor="tester", risk_profile="nope")
+            extract.assert_not_called()
+        self.assertEqual(BiometricVerification.objects.count(), 0)
+
+    def test_row_risk_profile_defaults_to_empty_string(self):
+        verify(SUBJECT_MODEL, "s1", "voice_device", device_score=60.0, actor="tester")
+        self.assertEqual(BiometricVerification.objects.get(subject_id="s1").risk_profile, "")
 
 
 class TestConsolidate(_MultimodalServiceTestCase):
@@ -676,3 +852,155 @@ class TestSubjectModelDefault(_MultimodalServiceTestCase):
             sample=b"photo", actor="tester",
         )
         self.assertEqual(template.subject_model, "other.Model")
+
+
+def _png(array) -> bytes:
+    import numpy as np
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.fromarray(np.asarray(array, dtype=np.uint8)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _sharp_png(seed=7) -> bytes:
+    import numpy as np
+
+    return _png(np.random.default_rng(seed).integers(0, 256, size=(64, 64), dtype=np.uint8))
+
+
+def _blurry_png(level=128) -> bytes:
+    import numpy as np
+
+    return _png(np.full((64, 64), level, dtype=np.uint8))
+
+
+def _keys_and_leaves(node, keys=None, leaves=None):
+    """Every dict key and every leaf value of a JSON document, as (set, list)."""
+    keys = set() if keys is None else keys
+    leaves = [] if leaves is None else leaves
+    if isinstance(node, dict):
+        for key, value in node.items():
+            keys.add(key)
+            _keys_and_leaves(value, keys, leaves)
+    elif isinstance(node, list):
+        for value in node:
+            _keys_and_leaves(value, keys, leaves)
+    else:
+        leaves.append(node)
+    return keys, leaves
+
+
+@skipUnless(pillow_available(), "Pillow is not importable")
+class TestEnrolQualityGate(_MultimodalServiceTestCase):
+
+    def _enforce(self, **modalities):
+        BiometricConfig.quality = {"mode": "enforce", "modalities": modalities}
+
+    def test_advisory_default_leaves_enrol_unchanged_and_stores_verdict(self):
+        BiometricConfig.dedup_threshold = {"face": 0.9}
+        sample = _blurry_png()
+        previous = enrol(SUBJECT_MODEL, "s1", "face", b"earlier-photo", actor="tester")
+
+        row = enrol(SUBJECT_MODEL, "s1", "face", sample, actor="tester", metadata={"cuvee_id": 3})
+
+        self.assertEqual(row.vector, _hash_to_vector(sample, 8))
+        self.assertIsNone(row.quality)
+        self.assertEqual(row.metadata, {"cuvee_id": 3})
+        previous.refresh_from_db()
+        self.assertIsNotNone(previous.validity_to)
+        self.assertIsNone(row.validity_to)
+
+        row.refresh_from_db()
+        self.assertEqual(row.quality_verdict["status"], "REFUSED")
+        self.assertEqual(row.quality_verdict["mode"], "advisory")
+        self.assertEqual(row.quality_verdict["reasons"], ["sharpness_below_min"])
+
+        self.assertIn(str(row.id), [m.template_id for m in identify("face", sample=sample)])
+        enrol(SUBJECT_MODEL, "s2", "face", sample, actor="tester")
+        pairs = [{c.subject_a, c.subject_b} for c in BiometricCandidateSource(modality="face").scan(None)]
+        self.assertIn({"s1", "s2"}, pairs)
+
+    def test_enforce_refuses_blurry_sample_and_keeps_previous_template(self):
+        self._enforce()
+        previous = enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester")
+        count = BiometricTemplate.objects.count()
+
+        with self.assertRaises(QualityRefusedError) as ctx:
+            enrol(SUBJECT_MODEL, "s1", "face", _blurry_png(), actor="tester")
+
+        self.assertEqual(ctx.exception.verdict.reasons, ["sharpness_below_min"])
+        self.assertNotIn("s1", str(ctx.exception))
+        previous.refresh_from_db()
+        self.assertIsNone(previous.validity_to)
+        self.assertEqual(BiometricTemplate.objects.count(), count)
+
+    def test_enforce_accepts_sharp_sample(self):
+        self._enforce()
+        row = enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester")
+        self.assertEqual(row.quality_verdict["status"], "ACCEPTED")
+        self.assertEqual(row.quality_verdict["mode"], "enforce")
+
+    def test_enforce_refuses_provider_roll_beyond_bound(self):
+        self._enforce()
+        ProviderRegistry.get_provider("face").face_geometry = FaceGeometry(pose={"roll": 30.0})
+        with self.assertRaises(QualityRefusedError) as ctx:
+            enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester")
+        self.assertEqual(ctx.exception.verdict.reasons, ["roll_above_max"])
+        self.assertFalse(BiometricTemplate.objects.filter(subject_id="s1").exists())
+
+    def test_enforce_enrols_fingerprint_not_assessed(self):
+        self._enforce()
+        row = enrol(SUBJECT_MODEL, "s1", "fingerprint", b"tmpl", actor="tester")
+        self.assertEqual(row.quality_verdict["status"], "NOT_ASSESSED")
+        self.assertEqual(row.template, b"tmpl")
+
+    def test_enforce_refuses_fingerprint_below_configured_min_quality(self):
+        self._enforce(fingerprint={"min_quality": 40})
+        ProviderRegistry.get_provider("fingerprint").reported_quality = 10.0
+        with self.assertRaises(QualityRefusedError) as ctx:
+            enrol(SUBJECT_MODEL, "s1", "fingerprint", b"tmpl", actor="tester")
+        self.assertEqual(ctx.exception.verdict.reasons, ["provider_quality_below_min"])
+
+    def test_device_template_on_non_image_sample_is_not_assessed(self):
+        self._enforce()
+        device = Extracted(vector=[0.1] * 8, quality=None)
+        row = enrol(SUBJECT_MODEL, "s1", "face", b"raw", actor="tester", device_template=device)
+        self.assertEqual(row.quality_verdict["status"], "NOT_ASSESSED")
+        sharp = next(m for m in row.quality_verdict["measures"] if m["name"] == "sharpness")
+        self.assertEqual(sharp["detail"], "sample_not_image")
+
+    def test_device_template_geometry_is_judged(self):
+        self._enforce()
+        device = Extracted(vector=[0.1] * 8, face=FaceGeometry(pose={"roll": 30.0}))
+        with self.assertRaises(QualityRefusedError) as ctx:
+            enrol(SUBJECT_MODEL, "s1", "face", b"raw", actor="tester", device_template=device)
+        self.assertEqual(ctx.exception.verdict.reasons, ["roll_above_max"])
+
+    def test_geometry_is_never_persisted(self):
+        box = (3.25, 4.75, 57.125, 58.625)
+        landmarks = {
+            "left_eye": (21.375, 23.625), "right_eye": (41.875, 24.125), "nose": (31.625, 37.25),
+            "mouth_left": (24.375, 47.875), "mouth_right": (39.625, 48.125),
+        }
+        ProviderRegistry.get_provider("face").face_geometry = FaceGeometry(box=box, landmarks=landmarks)
+
+        row = enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester", metadata={"k": "v"})
+        row.refresh_from_db()
+
+        self.assertEqual(row.metadata, {"k": "v"})
+        coordinates = {c for point in landmarks.values() for c in point} | set(box)
+        keys, leaves = _keys_and_leaves(row.quality_verdict)
+        self.assertFalse({"box", "landmarks", "face", "pose"} & keys)
+        self.assertFalse([v for v in leaves if isinstance(v, float) and v in coordinates])
+
+    def test_quality_status_property(self):
+        row = enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester")
+        self.assertEqual(row.quality_status, "ACCEPTED")
+        legacy = BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id="s2", modality="face", kind="embedding",
+            vector=[1.0], provider="fake_embedding", model_name="",
+        )
+        legacy.refresh_from_db()
+        self.assertIsNone(legacy.quality_verdict)
+        self.assertIsNone(legacy.quality_status)

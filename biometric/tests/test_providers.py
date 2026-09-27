@@ -10,12 +10,13 @@ from django.test import SimpleTestCase
 from biometric.providers.base import (
     EmbeddingProvider,
     Extracted,
+    FaceGeometry,
     MatcherProvider,
     ModalityProvider,
 )
 from biometric.providers.deepface_provider import DeepFaceProvider
 from biometric.providers.device_reported import DeviceReportedMatcher
-from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider
+from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider, _hash_to_vector
 
 
 class TestExtracted(SimpleTestCase):
@@ -134,3 +135,34 @@ class TestFakeMatcherProvider(SimpleTestCase):
     def test_extract_wraps_bytes(self):
         provider = FakeMatcherProvider()
         self.assertEqual(provider.extract(b"tmpl").template, b"tmpl")
+
+
+class TestFaceGeometry(SimpleTestCase):
+
+    def test_defaults(self):
+        face = FaceGeometry()
+        self.assertIsNone(face.box)
+        self.assertEqual(face.landmarks, {})
+        self.assertIsNone(face.pose)
+
+    def test_extracted_face_defaults_to_none(self):
+        self.assertIsNone(Extracted().face)
+
+
+class TestFakeProvidersQualityOptIn(SimpleTestCase):
+
+    def test_embedding_default_output_unchanged(self):
+        self.assertEqual(FakeEmbeddingProvider().extract(b"x"), Extracted(vector=_hash_to_vector(b"x", 8)))
+
+    def test_embedding_returns_configured_geometry_and_quality(self):
+        face = FaceGeometry(box=(1.0, 2.0, 3.0, 4.0), pose={"roll": 5.0})
+        provider = FakeEmbeddingProvider(face_geometry=face, reported_quality=77.0)
+        extracted = provider.extract(b"x")
+        self.assertIs(extracted.face, face)
+        self.assertEqual(extracted.quality, 77.0)
+
+    def test_matcher_default_output_unchanged(self):
+        self.assertEqual(FakeMatcherProvider().extract(b"t"), Extracted(template=b"t"))
+
+    def test_matcher_reported_quality_opt_in(self):
+        self.assertEqual(FakeMatcherProvider(reported_quality=12.0).extract(b"t").quality, 12.0)

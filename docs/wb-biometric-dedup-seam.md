@@ -161,6 +161,7 @@ configuration, all optional with defaults:
 "DEDUP_THRESHOLD": {"face": 0.62},  # similarity at/above which a candidate is emitted
 "FUSION": {"weights": {"face": 1.0}, "thresholds": {"accept": 0.7, "review": 0.6},
            "floors": {}, "floor_decision": "review"},
+"RISK_PROFILES": {},              # named tighten-only overrides of FUSION / MODALITIES (§6.8)
 ```
 
 ### 3.3 Models — new migrations only (`0005_…` onward); existing tables untouched
@@ -184,6 +185,8 @@ configuration, all optional with defaults:
 `BiometricVerification` (`db_table="biometric_verification"`) — the generic audit
 - subject ref; `modality`; `score` float null; `threshold` float; `verified` bool
 - `origin` `"server"|"device"`; `fallback` bool; `context` JSON; `device_id` char(255) blank
+- `risk_profile` char(64) blank, default `""`: the named risk profile the threshold was resolved
+  under (§6.8); `threshold` holds the effective value after the profile.
 - `actor` char(64); `created_at`. Never stores a sample. `ClaimFacialAudit` stays as is.
 
 `BiometricConsent` — subject ref; `modality`; `granted` bool; `recorded_by`; `recorded_at`; `note`.
@@ -208,8 +211,9 @@ Supersedes an active row with the same unique key (`validity_to = now`) rather t
 
 ```python
 verify(subject_model, subject_id, modality, *, sample: bytes | None = None, position=None,
-       device_score: float | None = None, fallback=False, context=None, device_id="", actor)
-       -> VerificationResult   # extended with .modality, .origin, .threshold
+       device_score: float | None = None, fallback=False, context=None, device_id="", actor,
+       risk_profile: str | None = None)
+       -> VerificationResult   # extended with .modality, .origin, .threshold, .risk_profile
 ```
 Server path: extract, compare with every active template of the subject for that modality
 (and position when given), keep the best similarity. Device path: `device_score` is checked
@@ -228,8 +232,9 @@ flag; tests cover the NumPy path and assert the flag routes). Template kind: ite
 
 ```python
 fuse(scores: dict[str, float | None], *, weights=None, thresholds=None, floors=None,
-     floor_decision=None, required: set[str] = frozenset()) -> Decision
-# Decision(outcome: "accept"|"review"|"reject", score: float | None, reasons: list[str])
+     floor_decision=None, required: set[str] = frozenset(), risk_profile: str | None = None) -> Decision
+# Decision(outcome: "accept"|"review"|"reject", score: float | None, reasons: list[str],
+#          risk_profile: str = "")
 ```
 Weighted mean of present, positively-weighted legs, normalised to the provider thresholds
 (a leg's score is divided by its modality threshold so 1.0 = at threshold). Rules only ever
@@ -264,6 +269,8 @@ Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`; queries
 `gql_biometric_enrol_perms=["174001"]`, `gql_biometric_verify_perms=["174002"]`,
 `gql_biometric_identify_perms=["174003"]`, `gql_biometric_read_perms=["174004"]`, following
 the pattern of the module's existing rights. Samples travel base64.
+`verifyBiometric` takes an optional `riskProfile: String` (§6.8); `BiometricVerifyResultType`
+and `BiometricVerificationRecordType` expose `riskProfile: String`.
 
 ### 3.7 Tests (pytest, fake providers)
 crypto round-trip; enrol (supersede, consent refusal, device template); verify server and device
@@ -506,3 +513,445 @@ with retries and installed `-e` with `--retries 10 --timeout 60`; `pytest==9.0.3
 pytest-django==4.12.0`. DB: `manage.py migrate` (`NO_DATABASE=True`), `manage.py check`,
 `openimis-dist-cameroun/scripts/setup_test_db.sh` with `DB_PORT=55435
 DB_NAME=openimis_health`, then `drop_orphan_fks.py` against `test_imis`.
+
+### 6.7 Enrolment quality gate
+
+`biometric/quality.py` judges every sample `enrol()` stores. It is provider-agnostic, needs
+only NumPy, and reads images through Pillow when Pillow is importable (it is not a
+dependency). It runs after extraction and before encryption and the supersede loop.
+
+**Face geometry.** Providers may attach `Extracted.face: FaceGeometry | None` (last field of
+`Extracted`, default `None`):
+
+```python
+@dataclass
+class FaceGeometry:
+    box: tuple[float, float, float, float] | None = None   # x, y, width, height
+    landmarks: dict[str, tuple[float, float]] = {}          # (x, y) per name
+    pose: dict[str, float] | None = None                    # degrees: yaw, pitch, roll
+```
+
+- Pixel grid: the sample as Pillow decodes it, without EXIF transpose. Origin top-left,
+  x to the right, y downwards.
+- Landmark names read: `left_eye`, `right_eye`, `nose`, `mouth_left`, `mouth_right`; other
+  keys are ignored.
+- Pose: any subset of `yaw`, `pitch`, `roll`, in degrees; positive roll turns the head
+  clockwise in the image.
+- Geometry is never persisted: neither `metadata` nor the verdict carries a box or a
+  landmark, only measures derived from them.
+
+**Measures.** Each measure records `name`, `value`, `limit`, `kind` (`min` | `max`),
+`passed`, `source` (`image` | `provider_pose` | `landmarks` | `provider`) and `detail`.
+A measure is judged only when both value and limit are non-null; `passed` is `null`
+otherwise. The bound itself is admitted (`value >= limit`, `abs(value) <= limit`).
+
+| Modality | Measure | Limit key | Default |
+|---|---|---|---|
+| face | `sharpness` — variance of the 5-point Laplacian of the whole grayscale sample | `min_sharpness` | 100.0 |
+| face | `lower_face_uniformity` — median summed absolute CIE L*a*b* deviation from the region's median colour, inside the lower part of the provider box, mouth band cut out | `min_lower_face_uniformity` | None |
+| face | `yaw`, `pitch`, `roll` — provider pose when given; else roll from the eye line | `max_yaw`, `max_pitch`, `max_roll` | 20.0, None, 20.0 |
+| face | `yaw_ratio` — nose offset along the eye axis over half the inter-ocular distance (landmarks only) | `max_yaw_ratio` | None |
+| any | `provider_quality` — `Extracted.quality` | `min_quality` | None |
+
+Other modalities carry `provider_quality` only.
+
+**Verdict.** Stored on `BiometricTemplate.quality_verdict` (JSON, nullable; `NULL` = the gate
+never ran on that row) and exposed as `BiometricTemplateType.qualityVerdict`:
+
+```
+{"status": "ACCEPTED" | "REFUSED" | "NOT_ASSESSED", "mode": "advisory" | "enforce",
+ "modality": str, "reasons": [str], "measures": [measure], "version": 1}
+```
+
+- `REFUSED` when any judged measure fails; `ACCEPTED` when at least one is judged and none
+  fails; `NOT_ASSESSED` when nothing was judged.
+- Reasons, one per failed judged measure, in measure order: `sharpness_below_min`,
+  `lower_face_uniformity_below_min`, `yaw_above_max`, `pitch_above_max`, `roll_above_max`,
+  `yaw_ratio_above_max`, `provider_quality_below_min`; plus `sample_undecodable`.
+- Server extraction (no `device_template`) of a sample Pillow cannot decode: `REFUSED`,
+  reason `sample_undecodable`. With a `device_template`, image measures of an undecodable
+  sample carry detail `sample_not_image` and only the device's `quality` and `face` are
+  judged.
+- Pillow absent: image measures carry detail `pillow_unavailable` and never refuse.
+
+**Config.** `BIOMETRIC["QUALITY"]` / `quality` in the `biometric` module configuration:
+
+```python
+"QUALITY": {
+    "mode": "advisory",            # "advisory" | "enforce"
+    "modalities": {
+        "face": {"min_sharpness": 100.0, "max_yaw": 20.0, "max_pitch": None, "max_roll": 20.0,
+                 "max_yaw_ratio": None, "min_lower_face_uniformity": None, "min_quality": None},
+    },
+},
+```
+
+Nested keys are lowercase. Thresholds merge per key over the built-in defaults, so a partial
+dict keeps the others. Any modality not listed uses `{"min_quality": None}`. An unknown mode
+is logged at startup and raises `ImproperlyConfigured` when `enrol()` runs.
+
+**Modes.**
+- `advisory` (default): the verdict is stored; everything else `enrol()` does is unchanged,
+  and the row joins the gallery whatever its status.
+- `enforce`: a `REFUSED` verdict raises `QualityRefusedError(verdict)` (a `ValueError`)
+  before anything is superseded or written; the subject's previous active template stays
+  active. `NOT_ASSESSED` is never refused.
+
+**GraphQL error.** In enforce mode a refused `enrolBiometric` returns `data.enrolBiometric:
+null` and `errors[0].extensions = {"code": "BIOMETRIC_QUALITY_REFUSED", "verdict": {...}}`.
+The message lists the reason codes and never the subject id.
+
+**Scope.** `verify`, `identify`, the dedup candidate source, `consolidate` and `purge` ignore
+the verdict.
+
+### 6.8 Risk profiles
+
+`biometric/risk_profiles.py` holds named profiles under `BIOMETRIC["RISK_PROFILES"]` (module
+configuration key `risk_profiles`, default `{}`). A profile is a partial override that can only
+tighten the base: `BIOMETRIC["FUSION"]` for `fuse()` and `BIOMETRIC["MODALITIES"][m]["threshold"]`
+for `verify()` and for the per-leg normalisation in `fuse()`.
+
+```python
+"RISK_PROFILES": {
+    "high_risk": {
+        "thresholds": {"accept": 0.9},             # accept / review, may only rise
+        "floors": {"fingerprint": 60},             # may only rise; a new floor is allowed
+        "floor_decision": "reject",                # "review" -> "reject" only
+        "required": ["fingerprint"],               # union with the caller's set
+        "modality_thresholds": {"face": 0.8},      # raw provider scale, configured modalities only
+    },
+},
+```
+
+**Keys.** `thresholds`, `floors`, `floor_decision`, `required`, `modality_thresholds`. `weights`
+is refused: weights have no strictness order, and moving weight onto one leg can accept a score
+vector the base reviews. A profile that needs a stronger leg uses `floors`, `required` or
+`modality_thresholds`.
+
+**Validation** (`profile_errors`, `validate_profiles`) refuses, with a message naming the profile
+and the key:
+- a name that is not a string, is blank or is longer than 64 characters;
+- overrides that are not a non-empty dict; an unknown key; `weights`;
+- a threshold, floor or modality threshold that is not a finite number (bool excluded), a
+  negative threshold or floor, or a value below the base;
+- a merged `review` above the merged `accept`;
+- a `floor_decision` outside `review`/`reject`, or `review` when the base is `reject`;
+- `required` that is not a list of modality names;
+- a `modality_thresholds` entry for a modality with no configured numeric threshold.
+
+`BiometricConfig.ready()` logs every error (`biometric.apps`, level ERROR) and never raises, so a
+bad module configuration row does not stop the backend or `manage.py migrate`. `resolve()` validates
+the named profile again on each call against the configured base and raises `RiskProfileError`
+(an `ImproperlyConfigured`), which covers configuration changed at runtime.
+
+**Merge.** `tighten()` merges per key onto the rules the caller resolved: `max` for `accept`,
+`review`, each floor and each modality threshold; the stricter `floor_decision`; the union of
+`required`. A key the profile omits keeps the base value, and explicit `thresholds=`/`floors=`/
+`floor_decision=`/`required=` arguments to `fuse()` are clamped the same way, so a profile never
+loosens them. In `fuse()` a leg with a raised modality threshold is normalised to the lower of
+`score / base_threshold` and `score / profile_threshold`, so a negative leg score is never lifted.
+
+**Unknown name.** `fuse()` and `verify()` raise `UnknownRiskProfileError` (a `ValueError`)
+synchronously: `fuse()` before any scoring, `verify()` before extraction and before any row is
+written. Over GraphQL it is an error on `verifyBiometric`, never `verified: false`. Choosing a
+profile needs no right beyond `gql_biometric_verify_perms` (174002).
+
+**Recorded.** `verify()` writes the profile name to `BiometricVerification.risk_profile` and the
+effective threshold, `max(base, profile)`, to `threshold`. A profile that does not name the
+verified modality leaves the threshold unchanged and still records its name. `fuse()` writes
+nothing; its `Decision.risk_profile` carries the name.
+
+**Default.** With `risk_profile` `None` or `""`, `fuse()` and `verify()` never call into
+`risk_profiles` and apply the base rules unchanged. A profile changes only the fusion rules and
+the modality thresholds listed above; no other threshold in the module reads it.
+
+### 6.9 Impersonation probe
+
+`biometric/impersonation.py` runs an optional 1:N search inside the server path of `verify()`:
+the probe already extracted for the 1:1 comparison is ranked against the whole gallery of its
+modality. A foreign subject at or above the probe threshold is reported as a possible
+impersonation. The probe never changes `score`, `threshold` or `verified`.
+
+```python
+"IMPERSONATION_PROBE": {
+    "enabled": False,          # master switch; False leaves verify() unchanged
+    "modalities": ["face"],    # modalities whose server-path verify() runs the probe
+    "top_k": 5,                # foreign subjects kept
+    "thresholds": {},          # {modality: similarity}; see the fallback chain below
+    "margin": None,            # None, or a float narrowing the suspect rule
+},
+```
+
+Module configuration key `impersonation_probe`. `probe_settings()` merges the configured dict
+over these defaults at read time, so `{"enabled": True}` alone uses the other defaults, and
+`{}` or `None` leaves the probe off.
+
+**When it runs.** Server path only (a `sample` is given), with `enabled` true and the modality
+listed. The device path (`device_score`) never probes: nothing is extracted. No `verifyBiometric`
+argument turns it on or off.
+
+**Threshold.** The first value set among `IMPERSONATION_PROBE["thresholds"][m]`,
+`DEDUP_THRESHOLD[m]`, `MODALITIES[m]["threshold"]`, then the provider's `default_threshold`. It
+is on the scale `identify()` returns (similarity for embeddings, the matcher's score for
+templates). A risk profile (§6.8) never changes it.
+
+**Search and exclusion.** Inside a savepoint (`transaction.atomic()`), the probe counts `n`, the
+claimed subject's active templates on the gallery key (modality, provider, model name, kind),
+then calls `identify(modality, vector=..., template=..., top_k=top_k + n)`. It never passes
+`sample` (no second extraction) and never passes `actor`. The claimed subject is dropped in
+Python by its `(subject_model, subject_id)` pair; `claimed_score` is the best of its dropped
+rows, or `None` when none surfaced. Reading `n` extra rows keeps `top_k` foreign rows when all
+of the claimed subject's templates rank first. A foreign subject with the same `subject_id` under
+another `subject_model` is still a candidate. `identify()` and its helpers are unchanged, so the
+numpy and pgvector paths both apply.
+
+**Candidates and suspicion.** Foreign rows are collapsed per subject (best template), filtered
+at `score >= threshold` and truncated to `top_k`. Each candidate is
+`{subject_model, subject_id, template_id, score, suspect}` with
+`suspect = margin is None or claimed_score is None or score >= claimed_score - margin`.
+`suspected` is true when any candidate is a suspect; `best_match` is the first suspect. With
+`margin` `None`, any foreign match at or above the threshold is a suspect, whatever the claimed
+subject's score.
+
+**Failure.** Any exception inside the probe is recorded as status `failed`, `suspected` false,
+and `error` = `"<ExceptionClass>: impersonation probe failed"`. The exception message is never
+stored, returned or logged: it can quote stored ciphertext (`decrypt_vector` returns the raw
+value on a wrong key) or the probe vector (psycopg2 interpolates parameters into its error text).
+`biometric.impersonation` logs a WARNING with the modality, that error and the stack frames only. `verify()` still returns and
+writes its row; the savepoint keeps a database error from aborting the caller's transaction. A
+modality on `DeviceReportedMatcher` listed here records `failed` on every server-path verify,
+because its `match()` raises.
+
+**Recorded.** Six columns on `BiometricVerification`:
+
+| Column | Content |
+|---|---|
+| `impersonation_status` | `""` not run, `"ok"`, `"failed"` |
+| `impersonation_suspected` | bool, default false |
+| `impersonation_subject_model` / `impersonation_subject_id` | the best suspect, `""` otherwise |
+| `impersonation_score` | the best suspect's score, null otherwise |
+| `impersonation_evidence` | JSON: `threshold`, `margin`, `top_k`, `claimed_score`, `candidates`, `error`, `latency_ms` |
+
+`VerificationResult.impersonation` carries the `ImpersonationProbe`, or `None` when the probe
+did not run.
+
+**Signal.** On a suspicion, `verify()` logs a warning naming the verification id and modality
+only, then registers `transaction.on_commit` to emit the service signal
+`biometric.impersonation_suspected` (registered by `biometric/signals.py`). Subscribers bind
+with `ServiceSignalBindType.AFTER` and read the payload from `kwargs["result"]`:
+
+```python
+{"verification_id", "subject_model", "subject_id", "modality",
+ "matched_subject_model", "matched_subject_id", "matched_template_id", "matched_score",
+ "claimed_score", "threshold", "margin", "actor", "device_id", "context"}
+```
+
+Core service signals use `Signal.send`, so a raising receiver would propagate; the emitter logs
+and swallows it. The payload links two subjects: a subscriber applies its own access rights.
+
+**GraphQL.** `verifyBiometric` and `biometricVerifications` rows expose `impersonation`
+(`BiometricImpersonationProbeType`: `status`, `suspected`, `threshold`, `margin`, `claimedScore`,
+`matchedSubjectModel`, `matchedSubjectId`, `matchedScore`, `candidates`, `error`, `latencyMs`),
+null when the probe did not run. `matchedSubjectModel`, `matchedSubjectId` and `candidates` are
+filled only for a caller holding `gql_biometric_identify_perms` (174003); with 174002 or 174004
+alone the caller gets the status, the verdict and the scores.
+
+**Deduplication.** `biometric` never reads deduplication tables (§2). A CONFIRMED merge removes
+the echo because `consolidate()` moves or supersedes the retired subject's active templates. An
+OPEN `DuplicateCandidate` pair is not suppressed: verifying either subject raises a suspicion
+naming the other until the pair is resolved. The signal payload names both subjects, so a
+subscriber can reconcile it.
+
+**Cost.** On the numpy path each probed verify decrypts and ranks every active template of the
+modality; `latency_ms` is recorded in the evidence. Large galleries use `VECTOR_INDEX="pgvector"`.
+
+### 6.10 Audit chain and alerts
+
+`biometric/audit_chain.py` appends hash-chained audit events. `biometric/audit_rules.py` raises
+alerts from them. The feature is off by default: while `BIOMETRIC["AUDIT"]["enabled"]` is not the
+boolean `True`, no event or alert row is written, no advisory lock is taken, no existing path
+gains a transaction (`audited_block()` returns `contextlib.nullcontext()`), and every return
+value is unchanged.
+
+```python
+"AUDIT": {
+    "enabled": False,   # master switch; only the boolean True turns it on
+    "rules": {},        # {rule kind: {param: value}}; overrides DEFAULT_RULES key by key
+},
+```
+
+Module configuration key `audit`. A settings override replaces the whole dict, so every reader
+uses `.get()`. Only `enabled` and `rules` are valid top-level keys.
+
+**Models** (migration generated with `makemigrations`; no data migration):
+
+| Model | Fields |
+|---|---|
+| `BiometricAuditEvent` (`biometric_audit_event`) | `id` UUID pk; `sequence` bigint UNIQUE; `action` char(48); `actor` char(64); `subject_model` char(64); `subject_id` char(64) indexed; `modality` char(16); `payload` JSON; `created_at` indexed; `prev_hash` char(64) UNIQUE; `hash` char(64). Indexes `biometric_audit_subject_idx` (action, subject_model, subject_id, created_at) and `biometric_audit_actor_idx` (actor, action, created_at). |
+| `BiometricAlert` (`biometric_alert`) | `id` UUID pk; `rule_kind` char(48); `severity` LOW / MEDIUM / HIGH; `title` char(200); `detail` JSON; `dedupe_key` char(200); `subject_model`; `subject_id` indexed; `trigger_event` FK PROTECT; `state` NEW / ACKNOWLEDGED / RESOLVED; `occurrences`; `triggered_at`; `last_seen_at`; `acknowledged_by` / `_at`; `resolved_by` / `_at`; `resolution_note`. Partial UNIQUE `biometric_alert_one_open_per_key` on (rule_kind, dedupe_key) where state is NEW or ACKNOWLEDGED. |
+
+Events are append-only. The manager's `update()` and `delete()` raise `PermissionError`, and so do
+`save()` on an existing row and `delete()` on an instance. The actor is the username string, as
+on `BiometricVerification`.
+
+**Actions** (`audit_chain.ACTIONS`):
+
+| Action | Recorded by | Subject | Payload |
+|---|---|---|---|
+| `template.enrol` | `enrol()` | enrolled subject | `template_id`, `position`, `provider`, `model_name`, `kind`, `quality`, `encrypted`, `device_template`, `superseded`, `quality_status`, `quality_reasons` |
+| `verify` | `verify()` | claimed subject | `verification_id`, `verified`, `score`, `threshold`, `origin`, `fallback`, `device_id`, `position`, `risk_profile`, `impersonation_status`, `impersonation_suspected` |
+| `impersonation.suspected` | `verify()` through `record_impersonation_suspected()` | claimed subject | `verification_id`, `matched_subject_model`, `matched_subject_id`, `matched_template_id`, `matched_score`, `claimed_score`, `threshold`, `margin` |
+| `identify` | `identify(actor=...)` only | none | `top_k`, `scope`, `exclude_subject`, `probe` (`sample` / `vector` / `template`), `matches` [{`subject_model`, `subject_id`, `template_id`, `score`}] |
+| `template.consolidate` | `consolidate()`, only when templates moved | kept subject | `retired_id`, `counts`, `template_ids` |
+| `template.purge` | `purge()`, one per tombstone | erased subject | `erasure_id`, `reason`, `erased` |
+| `template.read` | `templates_of()` | read subject | `purpose`, `template_ids`, `modality` |
+| `template.list` | `biometricTemplates` resolver | listed subject | `template_ids` |
+| `alert.acknowledge` / `alert.resolve` | triage services | the alert's subject | `alert_id`, `rule_kind`, `note` |
+
+The caller's `context` is never copied into a payload. `sanitize_payload()` refuses the keys
+`sample`, `vector`, `template`, `template_iso`, `embedding`, `image`, `frame` and `probe_vector` at
+any depth, lists holding more than 16 numbers, and NaN or infinity (`ValueError`). It also refuses
+binary values (`TypeError`). It converts UUIDs, dates and NumPy scalars, writes negative zero as
+`0.0` and integral floats of magnitude 1e16 or more as integers (the values Postgres `jsonb` returns),
+and returns the JSON round trip of the result, so the stored value and the hashed value are the same. A refused payload
+writes nothing and consumes no sequence.
+
+**Where events are written.** Each producer records its event as the last write of an
+`audited_block()`, so the event commits or rolls back with the business rows:
+
+- `enrol()`: the supersede loop, the insert and the event. The quality gate runs before the block,
+  so a refused sample records nothing.
+- `verify()`: the row and the `verify` event, then the `impersonation.suspected` event when the
+  probe suspects someone. The risk profile and the probe (§6.9) run before the block, so the lock is
+  never held during the probe's gallery search. The impersonation event is recorded here, inside
+  `verify()`. It is never recorded from the `biometric.impersonation_suspected` signal, which still
+  fires after commit as in §6.9.
+- `consolidate()`: inside its existing transaction.
+- `templates_of()`: the access log and the event.
+- `_erase()` (called by `purge()`): the delete, the tombstones, then one event per tombstone.
+
+The impersonation probe and `BiometricCandidateSource.scan` call `identify()` without an actor and
+record nothing.
+
+**Hash and lock.** `canonical_event(row)` is `json.dumps` of `{id, sequence, action, actor,
+subject_model, subject_id, modality, payload, created_at}` with `sort_keys=True`, separators `,`
+and `:`, and `allow_nan=False`. `created_at` is ISO with microseconds; an aware value is converted
+to naive UTC first. `hash = sha256(prev_hash || canonical_event(row))`, and
+`GENESIS_HASH = "0" * 64` is the `prev_hash` of sequence 1. `record_event()` takes
+`pg_advisory_xact_lock(0x42494F4155444954)` (Postgres only), reads the head, and inserts
+`sequence = head + 1`. The lock is held until the outermost transaction commits. The unique
+`sequence` and `prev_hash` turn an append that escaped the lock into an `IntegrityError`, not a fork.
+
+**Verifier.** `verify_chain(batch_size=1000)` walks the rows by `sequence` from `GENESIS_HASH` and
+returns a `ChainReport(checked, head_sequence, head_hash, divergence)`. The divergence is the first
+of:
+
+- `missing_event`: a sequence gap, including a deleted first row.
+- `broken_link`: `prev_hash` differs from the previous row's `hash`.
+- `altered_row`: the recomputed hash differs from the stored one.
+
+**Command.** `manage.py biometric_audit_verify [--batch-size N] [--expected-head HASH]
+[--expected-sequence N]` prints `biometric audit chain intact over {n} event(s); head sequence {s}
+hash {h}`. It raises `CommandError` on a divergence
+(`biometric audit chain diverges after {checked} event(s): {kind} at sequence {seq}: {detail}`) and
+when a recorded head no longer holds (`audit_chain.check_anchor()`). The expected values are a head
+printed by an earlier run; the chain may have grown since. The event at `--expected-sequence` must
+still exist and hold `--expected-head`. Given alone, `--expected-sequence` must not exceed the
+current head sequence and `--expected-head` must be the hash of some event. Sequence 0 with
+`GENESIS_HASH`, the head of an empty chain, holds on any chain.
+
+**What the chain proves, and what it does not.**
+
+- It proves that no stored row was altered, deleted or relinked in the middle of the chain.
+- Deleting the newest rows leaves a coherent chain. Only a head recorded outside this database and
+  passed back as `--expected-sequence` / `--expected-head` reveals it. It covers the events up to
+  that head; events appended later are covered once a newer head is recorded.
+- Someone holding both the database and the application can recompute a coherent chain.
+- `created_at` is asserted by this server. No timestamp authority signs it.
+- Changing `TIME_ZONE` after events exist changes every recomputed hash (openIMIS runs
+  `USE_TZ = False`).
+- Events have no retention. They hold `subject_id` and `actor`, but no biometric material.
+
+**Rules.** `evaluate_event(event_id)` runs from `transaction.on_commit` after each event. It skips
+missing events and every `alert.*` action. Each enabled rule runs in its own savepoint inside a
+try/except that logs and continues, so a failing rule never fails the committed operation or the
+other rules.
+
+| Kind | Defaults | Fires when | Dedupe key |
+|---|---|---|---|
+| `FAILED_VERIFICATIONS` | `enabled` True, `severity` MEDIUM, `threshold` 3, `window_minutes` 60, `per_modality` True | a `verify` event with `verified` false brings the subject's failed verifies in `[created_at - window, created_at]` (same modality when `per_modality`) to `threshold` or more | `failed_verifications:{subject_model}:{subject_id}[:{modality}]` |
+| `IMPERSONATION_SUSPECTED` | `enabled` True, `severity` HIGH | every `impersonation.suspected` event; the alert's subject is the claimed subject | `impersonation:{subject_model}:{subject_id}:{matched_subject_model}:{matched_subject_id}` |
+| `ACCESS_BURST` | `enabled` True, `severity` HIGH, `max_events` 200, `window_minutes` 60, `actions` [`template.read`, `template.list`, `identify`] | one non-blank actor records `max_events` or more watched actions in the window | `access_burst:{actor}` |
+
+Alert details:
+
+- `FAILED_VERIFICATIONS`: `attempts`, `threshold`, `window_minutes`, `modality`, `actors`,
+  `device_ids`.
+- `IMPERSONATION_SUSPECTED`: `verification_id`, `modality`, `matched_subject_model`,
+  `matched_subject_id`, `matched_template_id`, `matched_score`, `claimed_score`, `threshold`,
+  `margin`.
+- `ACCESS_BURST`: `actor`, `events`, `max_events`, `window_minutes`, `actions`,
+  `distinct_subjects`.
+
+`raise_alert()` locks the open alert (NEW or ACKNOWLEDGED) with the same `(rule_kind, dedupe_key)`
+and bumps `occurrences`, `last_seen_at`, `detail` and `trigger_event`. Otherwise it creates the
+alert; when a concurrent creator wins the partial unique constraint, it re-reads and bumps. After
+RESOLVED, the next occurrence opens a new alert.
+
+**Configuration checks.** `validate_audit_config(cfg)` returns a list of messages and never raises.
+It reports:
+
+- an unknown top-level key or rule kind;
+- an unknown parameter;
+- a non-boolean `enabled` or `per_modality`;
+- a severity outside LOW / MEDIUM / HIGH;
+- a `threshold`, `window_minutes` or `max_events` that is not a positive, non-boolean integer;
+- `actions` that is empty, or that holds an unknown action or an `alert.*` action.
+
+`BiometricConfig.ready()` logs each message as `BIOMETRIC['AUDIT']: …` and never raises.
+`rule_params(kind)` merges the defaults with the override and raises `ImproperlyConfigured` on an
+invalid result. `evaluate_event()` logs that error and skips the rule.
+
+**Triage.** `acknowledge_alert(alert_id, *, actor)` moves an alert from NEW to ACKNOWLEDGED.
+`resolve_alert(alert_id, *, actor, note="")` moves it from NEW or ACKNOWLEDGED to RESOLVED. Each
+locks the alert, applies `BiometricAlert.acknowledge()` / `.resolve()` (`ValidationError` on any
+other transition) and records `alert.acknowledge` / `alert.resolve`.
+
+**Rights.**
+
+- `gql_biometric_audit_perms` (`174005`) reads events and alerts.
+- `gql_biometric_alert_perms` (`174006`) acknowledges and resolves alerts.
+
+Settings keys are `GQL_BIOMETRIC_AUDIT_PERMS` and `GQL_BIOMETRIC_ALERT_PERMS`. These modules
+grant them to no role.
+
+**GraphQL** (relay connections, `ExtendedConnection`, page size capped by
+`RELAY_CONNECTION_MAX_LIMIT`):
+
+- `biometricAuditEvents`: `BiometricAuditEventGQLType` nodes, newest sequence first.
+  - Node fields: `id`, `sequence`, `action`, `actor`, `subjectModel`, `subjectId`, `modality`,
+    `payload`, `createdAt`, `prevHash`, `hash`.
+  - Arguments: `sequence`, `sequence_Lt`, `sequence_Gt`, `action`, `action_Startswith`, `actor`,
+    `subjectModel`, `subjectId`, `modality`, `createdAt_Gte`, `createdAt_Lte`, `orderBy`, `first`,
+    `after`, `before`, `last`, `offset`.
+  - Right: 174005.
+- `biometricAlerts`: `BiometricAlertGQLType` nodes ordered by `-triggeredAt`, `-id`.
+  - Node fields: `id`, `ruleKind`, `severity`, `state`, `title`, `detail`, `subjectModel`,
+    `subjectId`, `occurrences`, `triggeredAt`, `lastSeenAt`, `triggerEventId`, `acknowledgedBy`,
+    `acknowledgedAt`, `resolvedBy`, `resolvedAt`, `resolutionNote`. `dedupeKey` is not exposed.
+  - Arguments: `state`, `severity`, `ruleKind`, `open` (true: NEW or ACKNOWLEDGED only; false:
+    RESOLVED only), `subjectModel`, `subjectId`, `triggeredAt_Gte`, `triggeredAt_Lte`, `orderBy`,
+    `first`, `after`, `before`, `last`, `offset`.
+  - Right: 174005.
+- `acknowledgeBiometricAlert(id: String!)` and `resolveBiometricAlert(id: String!, note: String)`
+  take the alert's raw UUID and return the alert. An invalid transition is a GraphQL error.
+  Right: 174006.
+- **Identity stripping.** Without `gql_biometric_identify_perms` (174003):
+  - an `identify` event's `matches` lose `subject_model`, `subject_id` and `template_id`, keeping
+    `score`;
+  - an `impersonation.suspected` event's payload and an `IMPERSONATION_SUSPECTED` alert's detail
+    lose `matched_subject_model`, `matched_subject_id` and `matched_template_id`.
+
+  The stored rows are unchanged.
+- `identifyBiometric` passes `actor=user.username` to `identify()`, and `biometricTemplates`
+  records `template.list` when audit is on. Their arguments and results are unchanged.

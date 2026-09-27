@@ -1,6 +1,8 @@
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 # ---------------------------------------------------------------------------
 # Multimodal biometric identity + deduplication seam models
@@ -47,6 +49,9 @@ class BiometricTemplate(SubjectRef):
     provider = models.CharField(max_length=64)
     model_name = models.CharField(max_length=64)
     metadata = models.JSONField(default=dict, blank=True)
+    # The quality gate's verdict (biometric/quality.py); NULL on rows the gate
+    # never ran on. Holds derived measures only, never landmarks or face boxes.
+    quality_verdict = models.JSONField(null=True, blank=True)
 
     validity_from = models.DateTimeField(auto_now_add=True)
     validity_to = models.DateTimeField(null=True, blank=True, db_index=True)
@@ -73,6 +78,13 @@ class BiometricTemplate(SubjectRef):
     def is_active(self):
         return self.validity_to is None
 
+    @property
+    def quality_status(self):
+        """ACCEPTED | REFUSED | NOT_ASSESSED, or None when the gate never ran."""
+        if isinstance(self.quality_verdict, dict):
+            return self.quality_verdict.get("status")
+        return None
+
     def __str__(self):
         return f"BiometricTemplate({self.subject_model}:{self.subject_id}, {self.modality})"
 
@@ -93,6 +105,15 @@ class BiometricVerification(SubjectRef):
     origin = models.CharField(max_length=8, choices=ORIGIN_CHOICES, default=ORIGIN_SERVER)
     fallback = models.BooleanField(default=False)
     context = models.JSONField(default=dict, blank=True)
+    # The named risk profile the threshold was resolved under; empty for the base rules.
+    risk_profile = models.CharField(max_length=64, blank=True, default="")
+    # Impersonation probe (biometric/impersonation.py): status is "" when it did not run, "ok" or "failed".
+    impersonation_status = models.CharField(max_length=8, blank=True, default="")
+    impersonation_suspected = models.BooleanField(default=False)
+    impersonation_subject_model = models.CharField(max_length=64, blank=True, default="")
+    impersonation_subject_id = models.CharField(max_length=64, blank=True, default="")
+    impersonation_score = models.FloatField(null=True, blank=True)
+    impersonation_evidence = models.JSONField(default=dict, blank=True)
     device_id = models.CharField(max_length=255, blank=True, default="")
     actor = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -200,3 +221,139 @@ class BiometricAccessLog(SubjectRef):
 
     def __str__(self):
         return f"BiometricAccessLog({self.subject_model}:{self.subject_id}, purpose={self.purpose})"
+
+
+# ---------------------------------------------------------------------------
+# Audit chain and alerts (docs/wb-biometric-dedup-seam.md §6.10)
+# ---------------------------------------------------------------------------
+
+class AppendOnlyQuerySet(models.QuerySet):
+    """Refuses bulk update() and delete(): audit events are only ever inserted."""
+
+    def update(self, **kwargs):
+        raise PermissionError("biometric audit events are append-only")
+
+    def delete(self):
+        raise PermissionError("biometric audit events are append-only")
+
+
+class BiometricAuditEvent(models.Model):
+    """
+    One hash-chained audit event, written by audit_chain.record_event() only.
+    Carries identifiers, scores and counts, never biometric material.
+    hash = sha256(prev_hash || audit_chain.canonical_event(row)).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sequence = models.BigIntegerField(unique=True)
+    action = models.CharField(max_length=48)
+    actor = models.CharField(max_length=64, blank=True, default="")
+    subject_model = models.CharField(max_length=64, blank=True, default="")
+    subject_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    modality = models.CharField(max_length=16, blank=True, default="")
+    payload = models.JSONField(default=dict, blank=True)
+    # Set by record_event() before hashing, never on insert by the database.
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    prev_hash = models.CharField(max_length=64, unique=True)
+    hash = models.CharField(max_length=64)
+
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        db_table = "biometric_audit_event"
+        ordering = ("sequence",)
+        indexes = [
+            models.Index(
+                fields=["action", "subject_model", "subject_id", "created_at"],
+                name="biometric_audit_subject_idx",
+            ),
+            models.Index(fields=["actor", "action", "created_at"], name="biometric_audit_actor_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionError("biometric audit events are append-only")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("biometric audit events are append-only")
+
+    def __str__(self):
+        return f"BiometricAuditEvent(#{self.sequence}, {self.action})"
+
+
+class BiometricAlert(models.Model):
+    """
+    An alert raised by an audit rule (audit_rules.py). At most one open alert
+    (NEW or ACKNOWLEDGED) per (rule_kind, dedupe_key); a repeat bumps
+    occurrences on it instead of opening another.
+    """
+
+    STATE_NEW = "NEW"
+    STATE_ACKNOWLEDGED = "ACKNOWLEDGED"
+    STATE_RESOLVED = "RESOLVED"
+    STATE_CHOICES = [
+        (STATE_NEW, "New"), (STATE_ACKNOWLEDGED, "Acknowledged"), (STATE_RESOLVED, "Resolved"),
+    ]
+    OPEN_STATES = (STATE_NEW, STATE_ACKNOWLEDGED)
+
+    SEVERITY_LOW = "LOW"
+    SEVERITY_MEDIUM = "MEDIUM"
+    SEVERITY_HIGH = "HIGH"
+    SEVERITY_CHOICES = [(SEVERITY_LOW, "Low"), (SEVERITY_MEDIUM, "Medium"), (SEVERITY_HIGH, "High")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rule_kind = models.CharField(max_length=48)
+    severity = models.CharField(max_length=8, choices=SEVERITY_CHOICES)
+    title = models.CharField(max_length=200)
+    detail = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=200)
+    subject_model = models.CharField(max_length=64, blank=True, default="")
+    subject_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    trigger_event = models.ForeignKey(BiometricAuditEvent, on_delete=models.PROTECT, related_name="+")
+    state = models.CharField(max_length=16, choices=STATE_CHOICES, default=STATE_NEW)
+    occurrences = models.PositiveIntegerField(default=1)
+    triggered_at = models.DateTimeField(default=timezone.now)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    acknowledged_by = models.CharField(max_length=64, blank=True, default="")
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.CharField(max_length=64, blank=True, default="")
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "biometric_alert"
+        ordering = ("-triggered_at", "-id")
+        indexes = [
+            models.Index(fields=["state", "-triggered_at"], name="biometric_alert_state_idx"),
+            models.Index(fields=["rule_kind", "dedupe_key"], name="biometric_alert_key_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["rule_kind", "dedupe_key"],
+                condition=models.Q(state__in=["NEW", "ACKNOWLEDGED"]),
+                name="biometric_alert_one_open_per_key",
+            ),
+        ]
+
+    def acknowledge(self, actor):
+        """NEW -> ACKNOWLEDGED; any other state raises ValidationError."""
+        if self.state != self.STATE_NEW:
+            raise ValidationError(f"Only a NEW alert can be acknowledged; this one is {self.state}.")
+        self.state = self.STATE_ACKNOWLEDGED
+        self.acknowledged_by = str(actor or "")
+        self.acknowledged_at = timezone.now()
+        self.save(update_fields=["state", "acknowledged_by", "acknowledged_at"])
+
+    def resolve(self, actor, note=""):
+        """NEW or ACKNOWLEDGED -> RESOLVED; a RESOLVED alert raises ValidationError."""
+        if self.state not in self.OPEN_STATES:
+            raise ValidationError(f"Only an open alert can be resolved; this one is {self.state}.")
+        self.state = self.STATE_RESOLVED
+        self.resolved_by = str(actor or "")
+        self.resolved_at = timezone.now()
+        self.resolution_note = note or ""
+        self.save(update_fields=["state", "resolved_by", "resolved_at", "resolution_note"])
+
+    def __str__(self):
+        return f"BiometricAlert({self.rule_kind}, {self.state}, x{self.occurrences})"

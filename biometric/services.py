@@ -4,6 +4,8 @@ from datetime import timedelta
 from typing import Dict, FrozenSet, List, Optional
 
 from .providers.base import VerificationResult
+from .quality import QualityRefusedError  # noqa: F401  (re-exported for callers)
+from .risk_profiles import RiskProfileError, UnknownRiskProfileError  # noqa: F401  (re-exported for callers)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class Decision:
     outcome: str                 # "accept" | "review" | "reject"
     score: Optional[float]
     reasons: List[str] = field(default_factory=list)
+    risk_profile: str = ""       # the named profile the rules were resolved under, "" for the base
 
 
 def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, position=None, actor,
@@ -36,13 +39,25 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     one for (subject, modality, position, provider, model_name). Any previous
     active row on that same key is superseded (validity_to=now), never updated.
 
+    The quality gate (biometric/quality.py, §6.7) assesses the sample after
+    extraction; its verdict is stored on the row as quality_verdict. In enforce
+    mode a REFUSED verdict raises QualityRefusedError before anything is
+    superseded or written.
+
+    With BIOMETRIC["AUDIT"] enabled (§6.10), the supersede, the insert and a
+    template.enrol audit event share one transaction; a refused sample
+    records nothing.
+
     subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
     """
     from django.utils import timezone
 
     from . import crypto
     from .apps import BiometricConfig
+    from .audit_chain import ACTION_ENROL, audited_block, record_event
     from .models import BiometricConsent, BiometricTemplate
+    from .quality import REFUSED, assess
+    from .quality import mode as quality_mode
     from .registry import ProviderRegistry
 
     if subject_id is None or modality is None or sample is None:
@@ -69,6 +84,13 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     extracted = device_template if device_template is not None else provider.extract(sample, position=position)
     model_name = getattr(provider, "model_name", "")
 
+    verdict = assess(
+        modality, sample, extracted, server_extracted=device_template is None, mode_value=quality_mode(),
+    )
+    if verdict.mode == "enforce" and verdict.status == REFUSED:
+        logger.info("enrol(): %s sample refused by the quality gate: %s", modality, verdict.reasons)
+        raise QualityRefusedError(verdict)
+
     key = BiometricConfig.template_key
     crypto.warn_if_unencrypted(key)
     encrypted = key is not None
@@ -80,28 +102,49 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     )
 
     now = timezone.now()
-    # Superseded row-by-row (not a queryset .update()) so post_save fires for
-    # each one — biometric_pgvector relies on it to drop the stale side row.
-    for stale in BiometricTemplate.objects.filter(
-        subject_model=subject_model, subject_id=subject_id, modality=modality,
-        position=position, provider=provider.provider_name, model_name=model_name,
-        validity_to__isnull=True,
-    ):
-        stale.validity_to = now
-        stale.save(update_fields=["validity_to"])
+    with audited_block():
+        superseded = []
+        # Superseded row-by-row (not a queryset .update()) so post_save fires for
+        # each one — biometric_pgvector relies on it to drop the stale side row.
+        for stale in BiometricTemplate.objects.filter(
+            subject_model=subject_model, subject_id=subject_id, modality=modality,
+            position=position, provider=provider.provider_name, model_name=model_name,
+            validity_to__isnull=True,
+        ):
+            stale.validity_to = now
+            stale.save(update_fields=["validity_to"])
+            superseded.append(str(stale.id))
 
-    return BiometricTemplate.objects.create(
-        subject_model=subject_model, subject_id=subject_id, modality=modality,
-        position=position, kind=provider.kind,
-        vector=vector, template=template_bytes, template_iso=template_iso_bytes,
-        encrypted=encrypted, quality=extracted.quality,
-        provider=provider.provider_name, model_name=model_name,
-        metadata={**extracted.metadata, **metadata},
-    )
+        template = BiometricTemplate.objects.create(
+            subject_model=subject_model, subject_id=subject_id, modality=modality,
+            position=position, kind=provider.kind,
+            vector=vector, template=template_bytes, template_iso=template_iso_bytes,
+            encrypted=encrypted, quality=extracted.quality,
+            provider=provider.provider_name, model_name=model_name,
+            metadata={**extracted.metadata, **metadata},
+            quality_verdict=verdict.as_dict(),
+        )
+        record_event(
+            ACTION_ENROL, actor=actor, subject_model=subject_model, subject_id=subject_id, modality=modality,
+            payload={
+                "template_id": str(template.id),
+                "position": position,
+                "provider": provider.provider_name,
+                "model_name": model_name,
+                "kind": provider.kind,
+                "quality": extracted.quality,
+                "encrypted": encrypted,
+                "device_template": device_template is not None,
+                "superseded": superseded,
+                "quality_status": verdict.status,
+                "quality_reasons": list(verdict.reasons),
+            },
+        )
+    return template
 
 
 def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, position=None,
-           device_score=None, fallback=False, context=None, device_id="", actor):
+           device_score=None, fallback=False, context=None, device_id="", actor, risk_profile=None):
     """
     Server path: extract the probe, compare with every active template of the
     subject for this modality (and position, if given), keep the best score.
@@ -109,10 +152,28 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     is checked against the modality threshold directly. Both record a
     BiometricVerification row.
 
+    risk_profile names a BIOMETRIC["RISK_PROFILES"] entry (§6.8); it can only
+    raise the modality threshold. The row records the profile name and the
+    effective threshold.
+
+    When BIOMETRIC["IMPERSONATION_PROBE"] is enabled for the modality, the
+    server path also ranks the extracted probe against the whole gallery
+    (biometric/impersonation.py, §6.9). Its outcome is recorded on the row and
+    returned as result.impersonation; score, threshold and verified are never
+    changed by it. A suspicion emits biometric.impersonation_suspected after
+    commit. An unknown name raises UnknownRiskProfileError, and a
+    malformed or looser profile RiskProfileError, before extraction and before
+    any row is written.
+
+    With BIOMETRIC["AUDIT"] enabled (§6.10), the row and a verify audit event
+    (plus an impersonation.suspected event on a suspicion) share one
+    transaction, opened after the probe.
+
     subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
     """
     from . import crypto
     from .apps import BiometricConfig
+    from .audit_chain import ACTION_VERIFY, audited_block, record_event
     from .models import BiometricTemplate
     from .models import BiometricVerification as BiometricVerificationModel
     from .registry import ProviderRegistry
@@ -129,7 +190,12 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     threshold = modality_cfg.get("threshold")
     if threshold is None:
         threshold = provider.default_threshold
+    if risk_profile:
+        from .risk_profiles import verify_threshold
 
+        threshold = verify_threshold(risk_profile, modality, threshold)
+
+    probe = None
     if device_score is not None:
         origin = "device"
         score = device_score
@@ -167,11 +233,84 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         score = best
         verified = score is not None and score >= threshold
 
-    BiometricVerificationModel.objects.create(
-        subject_model=subject_model, subject_id=subject_id, modality=modality,
-        score=score, threshold=threshold, verified=verified, origin=origin,
-        fallback=fallback, context=context, device_id=device_id or "", actor=actor,
-    )
+        from .impersonation import maybe_probe
+
+        probe = maybe_probe(subject_model, subject_id, modality, provider, extracted)
+
+    impersonation_fields = {}
+    if probe is not None:
+        best_match = probe.best_match or {}
+        impersonation_fields = {
+            "impersonation_status": probe.status,
+            "impersonation_suspected": probe.suspected,
+            "impersonation_subject_model": best_match.get("subject_model", ""),
+            "impersonation_subject_id": best_match.get("subject_id", ""),
+            "impersonation_score": best_match.get("score"),
+            "impersonation_evidence": probe.as_evidence(),
+        }
+
+    # The probe above runs before this block, so the audit lock is never held during it.
+    with audited_block():
+        row = BiometricVerificationModel.objects.create(
+            subject_model=subject_model, subject_id=subject_id, modality=modality,
+            score=score, threshold=threshold, verified=verified, origin=origin,
+            fallback=fallback, context=context, device_id=device_id or "", actor=actor,
+            risk_profile=risk_profile or "", **impersonation_fields,
+        )
+        record_event(
+            ACTION_VERIFY, actor=actor, subject_model=subject_model, subject_id=subject_id, modality=modality,
+            payload={
+                "verification_id": str(row.id),
+                "verified": bool(verified),
+                "score": score,
+                "threshold": threshold,
+                "origin": origin,
+                "fallback": bool(fallback),
+                "device_id": device_id or "",
+                "position": position or "",
+                "risk_profile": risk_profile or "",
+                "impersonation_status": probe.status if probe is not None else "",
+                "impersonation_suspected": bool(probe is not None and probe.suspected),
+            },
+        )
+        if probe is not None and probe.suspected:
+            record_impersonation_suspected(
+                subject_model, subject_id,
+                modality=modality,
+                verification_id=str(row.id),
+                matched_subject_model=probe.best_match["subject_model"],
+                matched_subject_id=probe.best_match["subject_id"],
+                matched_template_id=probe.best_match["template_id"],
+                matched_score=probe.best_match["score"],
+                claimed_score=probe.claimed_score,
+                threshold=probe.threshold,
+                margin=probe.margin,
+                actor=actor,
+            )
+
+    if probe is not None and probe.suspected:
+        from django.db import transaction
+
+        from . import signals
+
+        logger.warning("verify(): impersonation suspected on verification %s (%s)", row.id, modality)
+        signal_payload = {
+            "verification_id": str(row.id),
+            "subject_model": subject_model,
+            "subject_id": subject_id,
+            "modality": modality,
+            "matched_subject_model": probe.best_match["subject_model"],
+            "matched_subject_id": probe.best_match["subject_id"],
+            "matched_template_id": probe.best_match["template_id"],
+            "matched_score": probe.best_match["score"],
+            "claimed_score": probe.claimed_score,
+            "threshold": probe.threshold,
+            "margin": probe.margin,
+            "actor": actor,
+            "device_id": device_id or "",
+            "context": dict(context),
+        }
+        transaction.on_commit(lambda: signals.emit_impersonation_suspected(**signal_payload))
 
     return VerificationResult(
         verified=verified,
@@ -180,6 +319,34 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         modality=modality,
         origin=origin,
         threshold=threshold,
+        risk_profile=risk_profile or "",
+        impersonation=probe,
+    )
+
+
+def record_impersonation_suspected(subject_model, subject_id, *, modality, verification_id,
+                                   matched_subject_model, matched_subject_id, matched_template_id,
+                                   matched_score, claimed_score, threshold, margin, actor):
+    """
+    Records an impersonation.suspected audit event for the claimed subject
+    (docs/wb-biometric-dedup-seam.md §6.10). Decides nothing: the caller has
+    already found the suspicion. Returns the event, or None when audit is off.
+    """
+    from .audit_chain import ACTION_IMPERSONATION, record_event
+
+    return record_event(
+        ACTION_IMPERSONATION, actor=actor, subject_model=subject_model, subject_id=str(subject_id),
+        modality=modality,
+        payload={
+            "verification_id": str(verification_id),
+            "matched_subject_model": matched_subject_model,
+            "matched_subject_id": str(matched_subject_id),
+            "matched_template_id": str(matched_template_id) if matched_template_id is not None else None,
+            "matched_score": matched_score,
+            "claimed_score": claimed_score,
+            "threshold": threshold,
+            "margin": margin,
+        },
     )
 
 
@@ -326,10 +493,14 @@ def _identify_template(provider, modality, probe_template, top_k, scope, exclude
 
 
 def identify(modality, *, sample=None, vector=None, template=None, top_k=5,
-             scope=None, exclude_subject=None):
+             scope=None, exclude_subject=None, actor=None):
     """
     Rank the gallery (active templates for the modality's configured provider
     and model, filtered by scope on metadata keys) against one probe.
+
+    With actor given, the ranking is recorded as an identify audit event
+    (§6.10); internal callers (the impersonation probe, the deduplication
+    scan) pass none and record nothing.
     """
     from .apps import BiometricConfig
     from .registry import ProviderRegistry
@@ -344,22 +515,57 @@ def identify(modality, *, sample=None, vector=None, template=None, top_k=5,
 
     if provider.kind == "embedding":
         if BiometricConfig.vector_index == "pgvector":
-            return _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_subject)
-        return _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subject)
-    return _identify_template(provider, modality, probe_template, top_k, scope, exclude_subject)
+            matches = _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_subject)
+        else:
+            matches = _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subject)
+    else:
+        matches = _identify_template(provider, modality, probe_template, top_k, scope, exclude_subject)
+
+    if actor is not None:
+        from .audit_chain import ACTION_IDENTIFY, record_event
+
+        if sample is not None:
+            probe_kind = "sample"
+        elif vector is not None:
+            probe_kind = "vector"
+        else:
+            probe_kind = "template"
+        record_event(
+            ACTION_IDENTIFY, actor=actor, modality=modality,
+            payload={
+                "top_k": top_k,
+                "scope": scope,
+                "exclude_subject": str(exclude_subject) if exclude_subject is not None else None,
+                "probe": probe_kind,
+                "matches": [
+                    {
+                        "subject_model": m.subject_model, "subject_id": m.subject_id,
+                        "template_id": m.template_id, "score": m.score,
+                    }
+                    for m in matches
+                ],
+            },
+        )
+    return matches
 
 
 _OUTCOME_RANK = {"reject": 0, "review": 1, "accept": 2}
 
 
 def fuse(scores: Dict[str, Optional[float]], *, weights=None, thresholds=None,
-         floors=None, floor_decision=None, required: FrozenSet[str] = frozenset()):
+         floors=None, floor_decision=None, required: FrozenSet[str] = frozenset(),
+         risk_profile=None):
     """
     Weighted mean of present, positively-weighted legs, each normalised to its
     modality threshold (leg_score / leg_threshold, so 1.0 == at threshold).
     Rules only ever tighten the outcome: a missing required leg caps it at
     "review"; a leg below its floor caps it at floor_decision; otherwise the
     fused score is banded against thresholds["accept"]/["review"].
+
+    risk_profile names a BIOMETRIC["RISK_PROFILES"] entry (§6.8) merged over
+    the rules resolved above; it can only tighten them, and the Decision
+    carries its name. An unknown name raises UnknownRiskProfileError, and a
+    malformed or looser profile RiskProfileError, before any scoring.
     """
     from .apps import BiometricConfig
 
@@ -369,6 +575,26 @@ def fuse(scores: Dict[str, Optional[float]], *, weights=None, thresholds=None,
     floors = floors if floors is not None else fusion_cfg.get("floors", {})
     floor_decision = floor_decision or fusion_cfg.get("floor_decision", "review")
     modality_thresholds = BiometricConfig.modalities
+
+    leg_overrides = {}
+    if risk_profile:
+        from .risk_profiles import FusionRules, resolve
+
+        base = FusionRules(
+            thresholds={"accept": thresholds.get("accept", 1.0), "review": thresholds.get("review", 0.0)},
+            floors=dict(floors),
+            floor_decision=floor_decision,
+            required=frozenset(required),
+            modality_thresholds={
+                m: c.get("threshold") for m, c in modality_thresholds.items() if c.get("threshold")
+            },
+        )
+        rules = resolve(risk_profile, base)
+        thresholds = rules.thresholds
+        floors = rules.floors
+        floor_decision = rules.floor_decision
+        required = rules.required
+        leg_overrides = rules.modality_thresholds
 
     reasons = []
 
@@ -394,7 +620,12 @@ def fuse(scores: Dict[str, Optional[float]], *, weights=None, thresholds=None,
         if weight <= 0:
             continue
         leg_threshold = modality_thresholds.get(modality, {}).get("threshold") or 1.0
-        weighted_sum += (score / leg_threshold) * weight
+        normalised = score / leg_threshold
+        if leg_overrides.get(modality):
+            # The lower of the two normalisations, so a raised threshold never
+            # lifts a negative leg score.
+            normalised = min(normalised, score / leg_overrides[modality])
+        weighted_sum += normalised * weight
         weight_total += weight
 
     fused_score = weighted_sum / weight_total if weight_total > 0 else None
@@ -416,7 +647,7 @@ def fuse(scores: Dict[str, Optional[float]], *, weights=None, thresholds=None,
         rank = min(rank, _OUTCOME_RANK["review"])
     outcome = next(name for name, value in _OUTCOME_RANK.items() if value == rank)
 
-    return Decision(outcome=outcome, score=fused_score, reasons=reasons)
+    return Decision(outcome=outcome, score=fused_score, reasons=reasons, risk_profile=risk_profile or "")
 
 
 def consolidate(subject_model=None, kept_id=None, retired_id=None, *, actor):
@@ -432,6 +663,7 @@ def consolidate(subject_model=None, kept_id=None, retired_id=None, *, actor):
     from django.utils import timezone
 
     from .apps import BiometricConfig
+    from .audit_chain import ACTION_CONSOLIDATE, record_event
     from .models import BiometricAccessLog, BiometricTemplate
 
     if kept_id is None or retired_id is None:
@@ -465,9 +697,14 @@ def consolidate(subject_model=None, kept_id=None, retired_id=None, *, actor):
             counts[row.modality] = counts.get(row.modality, 0) + 1
 
         if retired_templates:
+            template_ids = [str(row.id) for row in retired_templates]
             BiometricAccessLog.objects.create(
                 subject_model=subject_model, subject_id=kept_id, actor=actor,
-                purpose="consolidate", template_ids=[str(row.id) for row in retired_templates],
+                purpose="consolidate", template_ids=template_ids,
+            )
+            record_event(
+                ACTION_CONSOLIDATE, actor=actor, subject_model=subject_model, subject_id=kept_id,
+                payload={"retired_id": retired_id, "counts": dict(counts), "template_ids": template_ids},
             )
 
     return counts
@@ -483,6 +720,7 @@ def templates_of(subject_model=None, subject_id=None, *, modality=None, actor, p
     """
     from . import crypto
     from .apps import BiometricConfig
+    from .audit_chain import ACTION_TEMPLATE_READ, audited_block, record_event
     from .models import BiometricAccessLog, BiometricTemplate
 
     if subject_id is None:
@@ -515,15 +753,27 @@ def templates_of(subject_model=None, subject_id=None, *, modality=None, actor, p
             "model_name": row.model_name,
         })
 
-    BiometricAccessLog.objects.create(
-        subject_model=subject_model, subject_id=subject_id, actor=actor,
-        purpose=purpose, template_ids=[r["id"] for r in results],
-    )
+    template_ids = [r["id"] for r in results]
+    with audited_block():
+        BiometricAccessLog.objects.create(
+            subject_model=subject_model, subject_id=subject_id, actor=actor,
+            purpose=purpose, template_ids=template_ids,
+        )
+        record_event(
+            ACTION_TEMPLATE_READ, actor=actor, subject_model=subject_model, subject_id=subject_id,
+            modality=modality or "",
+            payload={"purpose": purpose, "template_ids": template_ids, "modality": modality or None},
+        )
     return results
 
 
 def _erase(stale, *, reason, actor):
-    """Delete the given stale BiometricTemplate rows, tombstoning per subject."""
+    """
+    Delete the given stale BiometricTemplate rows, tombstoning per subject.
+    With audit enabled, one template.purge event per tombstone is recorded in
+    the same transaction.
+    """
+    from .audit_chain import ACTION_PURGE, audited_block, record_event
     from .models import BiometricErasure, BiometricTemplate
 
     if not stale:
@@ -535,16 +785,23 @@ def _erase(stale, *, reason, actor):
         by_subject.setdefault(subject_key, {})
         by_subject[subject_key][row.modality] = by_subject[subject_key].get(row.modality, 0) + 1
 
-    BiometricTemplate.objects.filter(id__in=[row.id for row in stale]).delete()
+    with audited_block():
+        BiometricTemplate.objects.filter(id__in=[row.id for row in stale]).delete()
 
-    tombstone = None
-    for (subject_model, subject_id), erased in by_subject.items():
-        tombstone = BiometricErasure.objects.create(
-            subject_model=subject_model, subject_id=subject_id,
-            modalities=list(erased.keys()), erased=erased,
-            reason=reason, erased_by=actor,
-        )
-    return tombstone
+        tombstones = [
+            BiometricErasure.objects.create(
+                subject_model=subject_model, subject_id=subject_id,
+                modalities=list(erased.keys()), erased=erased,
+                reason=reason, erased_by=actor,
+            )
+            for (subject_model, subject_id), erased in by_subject.items()
+        ]
+        for tombstone in tombstones:
+            record_event(
+                ACTION_PURGE, actor=actor, subject_model=tombstone.subject_model, subject_id=tombstone.subject_id,
+                payload={"erasure_id": str(tombstone.id), "reason": reason, "erased": dict(tombstone.erased)},
+            )
+    return tombstones[-1]
 
 
 def purge(now=None, *, actor="retention"):
