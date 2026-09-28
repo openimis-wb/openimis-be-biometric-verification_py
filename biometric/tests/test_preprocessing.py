@@ -7,7 +7,6 @@ or templates whose preprocessing differs.
 """
 
 import io
-import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +18,7 @@ from biometric.audit_chain import ACTION_VERIFY
 from biometric.dedup_source import BiometricCandidateSource
 from biometric.impersonation import PROBE_DEFAULTS
 from biometric.models import BiometricAuditEvent, BiometricTemplate, BiometricVerification
+from biometric.providers.base import Extracted
 from biometric.providers.deepface_provider import DeepFaceProvider
 from biometric.providers.fake import FakeEmbeddingProvider, FakeMatcherProvider, _hash_to_vector
 from biometric.registry import ProviderRegistry
@@ -139,6 +139,14 @@ class TestEnrolRecordsThePreprocessing(_PreprocessingTestCase):
 
         row.refresh_from_db()
         self.assertEqual(row.metadata, {PREPROCESSING_KEY: "p1"})
+
+    def test_a_device_template_gets_the_provider_tag(self):
+        device = Extracted(vector=[0.1] * 8, metadata={PREPROCESSING_KEY: "forged", "device": "tab-1"})
+
+        row = enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent", device_template=device)
+
+        row.refresh_from_db()
+        self.assertEqual(row.metadata, {"device": "tab-1", PREPROCESSING_KEY: "p1"})
 
     def test_a_provider_without_a_tag_stores_none_and_drops_a_caller_tag(self):
         BiometricConfig.modalities = {"face": {"provider": "fake_embedding", "threshold": 0.68}}
@@ -322,9 +330,6 @@ class TestDedupSourceSkipsOtherPreprocessing(_PreprocessingTestCase):
 
     def test_nothing_skipped_logs_nothing(self):
         self._face("a", b"photo", "p1")
-        logger = logging.getLogger("biometric.dedup_source")
 
-        with patch.object(logger, "info") as info:
+        with self.assertNoLogs("biometric.dedup_source", level="INFO"):
             list(BiometricCandidateSource("face").scan(None))
-
-        info.assert_not_called()
