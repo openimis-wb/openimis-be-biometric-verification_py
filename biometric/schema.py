@@ -105,6 +105,7 @@ class BiometricImpersonationProbeType(graphene.ObjectType):
     suspected = graphene.Boolean(required=True)
     threshold = graphene.Float()
     margin = graphene.Float()
+    top_k = graphene.Int(description="Foreign subjects the probe kept at most.")
     claimed_score = graphene.Float()
     matched_subject_model = graphene.String()
     matched_subject_id = graphene.String()
@@ -155,6 +156,7 @@ def _impersonation_gql(source, user):
         suspected=suspected,
         threshold=evidence.get("threshold"),
         margin=evidence.get("margin"),
+        top_k=evidence.get("top_k"),
         claimed_score=evidence.get("claimed_score"),
         matched_subject_model=best_match.get("subject_model") if may_identify else None,
         matched_subject_id=best_match.get("subject_id") if may_identify else None,

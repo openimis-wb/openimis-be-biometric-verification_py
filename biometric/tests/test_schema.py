@@ -643,3 +643,38 @@ class TestImpersonationOverGraphQL(SimpleTestCase):
         result = Query.resolve_biometric_verifications(None, _make_info(_auth_user()), subject_id="alice")
 
         self.assertIsNone(result[0].impersonation)
+
+
+class TestImpersonationEvidenceFields(SimpleTestCase):
+    """Every key of the stored evidence reaches the GraphQL type."""
+
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.services.verify")
+    def test_verify_result_exposes_top_k(self, mock_verify, mock_cfg):
+        TestImpersonationOverGraphQL._cfg(mock_cfg)
+        mock_verify.return_value = TestImpersonationOverGraphQL._result(_probe(top_k=7))
+
+        out = VerifyBiometricMutation.mutate(
+            None, _make_info(_auth_user()), subject_id="alice", modality="face", sample="YWJj",
+        )
+
+        self.assertEqual(out.impersonation.top_k, 7)
+        self.assertEqual(out.impersonation.latency_ms, 3.5)
+
+    @patch("biometric.schema.BiometricConfig")
+    @patch("biometric.models.BiometricVerification")
+    def test_verification_row_exposes_every_evidence_key(self, mock_model, mock_cfg):
+        from biometric.schema import BiometricImpersonationProbeType
+
+        TestImpersonationOverGraphQL._cfg(mock_cfg)
+        evidence = _probe(top_k=9, margin=0.1, error="").as_evidence()
+        mock_model.objects.filter.return_value.order_by.return_value = [
+            TestImpersonationOverGraphQL._row(impersonation_evidence=evidence),
+        ]
+
+        probe = Query.resolve_biometric_verifications(None, _make_info(_auth_user()), subject_id="alice")[0].impersonation
+
+        self.assertEqual(probe.top_k, 9)
+        exposed = {name for name in BiometricImpersonationProbeType._meta.fields}
+        for key in evidence:
+            self.assertIn(key, exposed)
