@@ -212,8 +212,9 @@ Supersedes an active row with the same unique key (`validity_to = now`) rather t
 ```python
 verify(subject_model, subject_id, modality, *, sample: bytes | None = None, position=None,
        device_score: float | None = None, fallback=False, context=None, device_id="", actor,
-       risk_profile: str | None = None)
-       -> VerificationResult   # extended with .modality, .origin, .threshold, .risk_profile
+       risk_profile: str | None = None, device_template: Extracted | None = None)
+       -> VerificationResult   # extended with .modality, .origin, .threshold, .risk_profile,
+                               # .impersonation, .impersonation_skip_reason
 ```
 Server path: extract, compare with every active template of the subject for that modality
 (and position when given), keep the best similarity. Device path: `device_score` is checked
@@ -270,7 +271,9 @@ Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`; queries
 `gql_biometric_identify_perms=["174003"]`, `gql_biometric_read_perms=["174004"]`, following
 the pattern of the module's existing rights. Samples travel base64.
 `verifyBiometric` takes an optional `riskProfile: String` (§6.8); `BiometricVerifyResultType`
-and `BiometricVerificationRecordType` expose `riskProfile: String`.
+and `BiometricVerificationRecordType` expose `riskProfile: String`. Later additions:
+`verifyBiometricMultimodal` (§6.11), `deviceVector` / `deviceTemplate` and
+`impersonationSkipReason` (§6.9), and the admin fields of §6.12.
 
 ### 3.7 Tests (pytest, fake providers)
 crypto round-trip; enrol (supersede, consent refusal, device template); verify server and device
@@ -601,6 +604,27 @@ is logged at startup and raises `ImproperlyConfigured` when `enrol()` runs.
 null` and `errors[0].extensions = {"code": "BIOMETRIC_QUALITY_REFUSED", "verdict": {...}}`.
 The message lists the reason codes and never the subject id.
 
+**Refusal trace.** With audit on (§6.10), a refused enrolment records a
+`template.enrol_refused` event carrying the verdict (status, mode, reasons, measures) and the
+provider metadata, never the sample or the vector. No template row is written.
+
+**DeepFace geometry.** `DeepFaceProvider.extract()` returns the embedding and
+`face_geometry_from_deepface(result, detector_backend=...)` of the same `DeepFace.represent()`
+result:
+
+- `box` = `facial_area` `x`, `y`, `w`, `h`, dropped unless all four are finite numbers with a
+  positive width and height.
+- `landmarks` = the `facial_area` points `left_eye`, `right_eye`, `nose`, `mouth_left`,
+  `mouth_right` that are present and finite. DeepFace returns the eyes on every supported version
+  (None when not found). It returns nose and mouth corners only on versions that pass them through,
+  and only for detectors that report them (retinaface).
+- `pose` = None: DeepFace reports no head angles. The gate derives roll from the eye line and
+  `yaw_ratio` from the nose, so `yaw` and `pitch` stay `no_pose`.
+- No geometry for `detector_backend="skip"` (the region is the whole frame) or for the
+  `enforce_detection=False` fallback (confidence 0 and no eye).
+- Coordinates are in the grid of the array passed to DeepFace, the Pillow decode without EXIF
+  transpose that the gate also reads.
+
 **Scope.** `verify`, `identify`, the dedup candidate source, `consolidate` and `purge` ignore
 the verdict.
 
@@ -661,24 +685,31 @@ effective threshold, `max(base, profile)`, to `threshold`. A profile that does n
 verified modality leaves the threshold unchanged and still records its name. `fuse()` writes
 nothing; its `Decision.risk_profile` carries the name.
 
+**Where each key applies.** `verify()` and `verifyBiometric` decide one modality: they apply
+`modality_thresholds` only. `verify_multimodal()` and `verifyBiometricMultimodal` (§6.11) apply
+every key: each leg's `verify()` takes the raised modality threshold, and the fused decision takes
+`thresholds`, `floors`, `floor_decision`, `required` and the normalisation by the raised modality
+thresholds.
+
 **Default.** With `risk_profile` `None` or `""`, `fuse()` and `verify()` never call into
 `risk_profiles` and apply the base rules unchanged. A profile changes only the fusion rules and
 the modality thresholds listed above; no other threshold in the module reads it.
 
 ### 6.9 Impersonation probe
 
-`biometric/impersonation.py` runs an optional 1:N search inside the server path of `verify()`:
-the probe already extracted for the 1:1 comparison is ranked against the whole gallery of its
-modality. A foreign subject at or above the probe threshold is reported as a possible
+`biometric/impersonation.py` runs an optional 1:N search inside `verify()`: the probe already
+extracted for the 1:1 comparison (server path), or the vector / template the device supplies
+(device path, opt-in), is ranked against the whole gallery of its modality. A foreign subject at or above the probe threshold is reported as a possible
 impersonation. The probe never changes `score`, `threshold` or `verified`.
 
 ```python
 "IMPERSONATION_PROBE": {
     "enabled": False,          # master switch; False leaves verify() unchanged
-    "modalities": ["face"],    # modalities whose server-path verify() runs the probe
+    "modalities": ["face"],    # modalities whose verify() runs the probe
     "top_k": 5,                # foreign subjects kept
     "thresholds": {},          # {modality: similarity}; see the fallback chain below
     "margin": None,            # None, or a float narrowing the suspect rule
+    "device_path": False,      # True: rank a device-supplied vector / template on the device path
 },
 ```
 
@@ -686,9 +717,25 @@ Module configuration key `impersonation_probe`. `probe_settings()` merges the co
 over these defaults at read time, so `{"enabled": True}` alone uses the other defaults, and
 `{}` or `None` leaves the probe off.
 
-**When it runs.** Server path only (a `sample` is given), with `enabled` true and the modality
-listed. The device path (`device_score`) never probes: nothing is extracted. No `verifyBiometric`
-argument turns it on or off.
+**When it runs.** With `enabled` true and the modality listed:
+
+- Server path (a `sample` is given): always, on the extracted probe.
+- Device path (`device_score` given): the server holds no sample, so the probe ranks what the
+  device extracted, passed as `verify(device_template=Extracted(...))`: `vector` for an embedding
+  modality, `template` for a template modality. It runs only when `device_path` is true. The
+  first applicable reason, in this order, is recorded when it does not run:
+  - `provider_matches_on_device`: the modality's provider is `DeviceReportedMatcher`, whose
+    `match()` raises, so the gallery cannot be ranked on the server whatever the device sends;
+  - `no_device_template`: the device supplied no vector (embedding kind) or template (template
+    kind);
+  - `device_path_disabled`: `device_path` is false.
+
+  The device's vector or template must come from the gallery's provider and model; nothing checks
+  it, as for a device template at `enrol()`. A device that misreports its score can also send a
+  template that matches nobody: the device-path probe detects only what the device honestly sends.
+  `device_template` with a `sample` raises `ValueError`.
+
+No `verifyBiometric` argument turns the probe on or off.
 
 **Threshold.** The first value set among `IMPERSONATION_PROBE["thresholds"][m]`,
 `DEDUP_THRESHOLD[m]`, `MODALITIES[m]["threshold"]`, then the provider's `default_threshold`. It
@@ -722,7 +769,7 @@ writes its row; the savepoint keeps a database error from aborting the caller's 
 modality on `DeviceReportedMatcher` listed here records `failed` on every server-path verify,
 because its `match()` raises.
 
-**Recorded.** Six columns on `BiometricVerification`:
+**Recorded.** Seven columns on `BiometricVerification`:
 
 | Column | Content |
 |---|---|
@@ -731,7 +778,9 @@ because its `match()` raises.
 | `impersonation_subject_model` / `impersonation_subject_id` | the best suspect, `""` otherwise |
 | `impersonation_score` | the best suspect's score, null otherwise |
 | `impersonation_evidence` | JSON: `threshold`, `margin`, `top_k`, `claimed_score`, `candidates`, `error`, `latency_ms` |
+| `impersonation_skip_reason` | `""`, or the reason an enabled probe did not run on the device path (migration 0003) |
 
+`VerificationResult.impersonation_skip_reason` carries the same reason as the column.
 `VerificationResult.impersonation` carries the `ImpersonationProbe`, or `None` when the probe
 did not run.
 
@@ -750,11 +799,14 @@ Core service signals use `Signal.send`, so a raising receiver would propagate; t
 and swallows it. The payload links two subjects: a subscriber applies its own access rights.
 
 **GraphQL.** `verifyBiometric` and `biometricVerifications` rows expose `impersonation`
-(`BiometricImpersonationProbeType`: `status`, `suspected`, `threshold`, `margin`, `claimedScore`,
+(`BiometricImpersonationProbeType`: `status`, `suspected`, `threshold`, `margin`, `topK`, `claimedScore`,
 `matchedSubjectModel`, `matchedSubjectId`, `matchedScore`, `candidates`, `error`, `latencyMs`),
 null when the probe did not run. `matchedSubjectModel`, `matchedSubjectId` and `candidates` are
 filled only for a caller holding `gql_biometric_identify_perms` (174003); with 174002 or 174004
 alone the caller gets the status, the verdict and the scores.
+Both also expose `impersonationSkipReason: String`. `verifyBiometric` takes `deviceVector: [Float!]`
+and `deviceTemplate: String` (base64) for the device-path probe; `BiometricVerifyLegInput` of
+`verifyBiometricMultimodal` takes the same two fields.
 
 **Deduplication.** `biometric` never reads deduplication tables (§2). A CONFIRMED merge removes
 the echo because `consolidate()` moves or supersedes the retired subject's active templates. An
@@ -799,7 +851,8 @@ on `BiometricVerification`.
 | Action | Recorded by | Subject | Payload |
 |---|---|---|---|
 | `template.enrol` | `enrol()` | enrolled subject | `template_id`, `position`, `provider`, `model_name`, `kind`, `quality`, `encrypted`, `device_template`, `superseded`, `quality_status`, `quality_reasons` |
-| `verify` | `verify()` | claimed subject | `verification_id`, `verified`, `score`, `threshold`, `origin`, `fallback`, `device_id`, `position`, `risk_profile`, `impersonation_status`, `impersonation_suspected` |
+| `template.enrol_refused` | `enrol()`, enforce mode, `REFUSED` verdict | subject of the refused sample | `position`, `provider`, `model_name`, `kind`, `quality`, `device_template`, `quality_status`, `quality_mode`, `quality_reasons`, `quality_measures` |
+| `verify` | `verify()` | claimed subject | `verification_id`, `verified`, `score`, `threshold`, `origin`, `fallback`, `device_id`, `position`, `risk_profile`, `impersonation_status`, `impersonation_suspected`, `impersonation_skip_reason` |
 | `impersonation.suspected` | `verify()` through `record_impersonation_suspected()` | claimed subject | `verification_id`, `matched_subject_model`, `matched_subject_id`, `matched_template_id`, `matched_score`, `claimed_score`, `threshold`, `margin` |
 | `identify` | `identify(actor=...)` only | none | `top_k`, `scope`, `exclude_subject`, `probe` (`sample` / `vector` / `template`), `matches` [{`subject_model`, `subject_id`, `template_id`, `score`}] |
 | `template.consolidate` | `consolidate()`, only when templates moved | kept subject | `retired_id`, `counts`, `template_ids` |
@@ -819,8 +872,11 @@ writes nothing and consumes no sequence.
 **Where events are written.** Each producer records its event as the last write of an
 `audited_block()`, so the event commits or rolls back with the business rows:
 
-- `enrol()`: the supersede loop, the insert and the event. The quality gate runs before the block,
-  so a refused sample records nothing.
+- `enrol()`: the supersede loop, the insert and the event. The quality gate runs before the block.
+  A sample refused in enforce mode writes no template and records `template.enrol_refused` in its
+  own block; `QualityRefusedError` is raised after that block. A caller transaction that rolls
+  back on the error discards the event. openIMIS runs GraphQL mutations outside a transaction
+  unless `ATOMIC_MUTATIONS` is set, so a refused `enrolBiometric` keeps its event.
 - `verify()`: the row and the `verify` event, then the `impersonation.suspected` event when the
   probe suspects someone. The risk profile and the probe (§6.9) run before the block, so the lock is
   never held during the probe's gallery search. The impersonation event is recorded here, inside
@@ -921,8 +977,13 @@ other transition) and records `alert.acknowledge` / `alert.resolve`.
 
 - `gql_biometric_audit_perms` (`174005`) reads events and alerts.
 - `gql_biometric_alert_perms` (`174006`) acknowledges and resolves alerts.
+- `gql_biometric_config_perms` (`174007`) reads the decision criteria and the retention policy
+  (§6.12).
+- `gql_biometric_audit_verify_perms` (`174008`), together with 174005, runs the chain
+  verification (§6.12).
 
-Settings keys are `GQL_BIOMETRIC_AUDIT_PERMS` and `GQL_BIOMETRIC_ALERT_PERMS`. These modules
+Settings keys are `GQL_BIOMETRIC_AUDIT_PERMS`, `GQL_BIOMETRIC_ALERT_PERMS`,
+`GQL_BIOMETRIC_CONFIG_PERMS` and `GQL_BIOMETRIC_AUDIT_VERIFY_PERMS`. These modules
 grant them to no role.
 
 **GraphQL** (relay connections, `ExtendedConnection`, page size capped by
@@ -955,3 +1016,90 @@ grant them to no role.
   The stored rows are unchanged.
 - `identifyBiometric` passes `actor=user.username` to `identify()`, and `biometricTemplates`
   records `template.list` when audit is on. Their arguments and results are unchanged.
+
+### 6.11 Multimodal verification
+
+`services.verify_multimodal()` verifies one subject on several modalities and fuses the scores.
+
+```python
+verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=False, context=None,
+                  device_id="", actor, risk_profile=None) -> MultimodalVerification
+# legs: [{"modality", "sample" | "device_score", "position"?, "device_template"?}]
+# MultimodalVerification(decision: Decision, legs: list[VerificationResult])   # legs in input order
+```
+
+- Each leg runs `verify()` with the shared `fallback`, `context`, `device_id`, `actor` and
+  `risk_profile`, and records its own `BiometricVerification` row and audit event.
+- The fused decision is `fuse({leg modality: leg score}, risk_profile=risk_profile)`: the
+  configured `BIOMETRIC["FUSION"]` rules tightened by the profile (§6.8). A leg with no score (no
+  active template) counts as missing, so a `required` modality caps the decision at review.
+- The caller passes no weights, thresholds, floors, floor decision or required set: without a
+  profile, explicit `fuse()` arguments are taken as given and could loosen the configured base.
+- Checked before any leg runs, so none of these write a row:
+  - `ValueError` for a leg list that is empty, has a non-dict leg, an unknown key, a missing
+    modality, a modality twice, a leg without exactly one of `sample` and `device_score`, or a
+    `device_template` with a `sample`;
+  - `KeyError` for a modality with no registered provider;
+  - `UnknownRiskProfileError` / `RiskProfileError` for the profile.
+- A leg that fails later (for example no face in its sample) raises and keeps the rows of the legs
+  before it. The legs do not share a transaction: with audit on, the chain lock of one leg is never
+  held during the next leg's impersonation probe.
+- The fused decision itself is not stored; each leg's row carries the profile name.
+
+GraphQL mutation `verifyBiometricMultimodal`, right `gql_biometric_verify_perms` (174002):
+
+- Arguments: `subjectId: String!`, `subjectModel: String`, `legs: [BiometricVerifyLegInput!]!`,
+  `riskProfile: String`, `fallback: Boolean`, `deviceId: String`, `context: JSONString`.
+- `BiometricVerifyLegInput`: `modality: String!`, `sample: String` (base64), `position: String`,
+  `deviceScore: Float`, `deviceVector: [Float!]`, `deviceTemplate: String` (base64).
+- Result `BiometricMultimodalVerifyResultType`: `outcome` (accept | review | reject), `score`,
+  `reasons`, `riskProfile`, `legs: [BiometricVerifyResultType!]!`.
+- An invalid leg list or profile is a GraphQL error and no verification is recorded.
+
+### 6.12 Admin queries
+
+Read-only views of the configuration and the retention and audit state. No field exposes
+`TEMPLATE_KEY`, provider settings, the dedupe key of an alert, or any biometric material.
+
+| Field | Kind | Right | Returns |
+|---|---|---|---|
+| `biometricDecisionCriteria` | query | 174007 | `BiometricDecisionCriteriaType` |
+| `biometricRetentionPolicy` | query | 174007 | `BiometricRetentionPolicyType`, null without a policy row |
+| `biometricErasures` | relay connection | 174005 | `BiometricErasureGQLType` nodes |
+| `biometricAuditChainStatus` | query | 174005 | `BiometricAuditChainCheckType`, null before the first check |
+| `verifyBiometricAuditChain` | mutation | 174008 and 174005 | `BiometricAuditChainCheckType` |
+
+**Decision criteria** (`risk_profiles.decision_criteria()`), built from `BIOMETRIC["FUSION"]`,
+the numeric `MODALITIES[m]["threshold"]` values and `BIOMETRIC["RISK_PROFILES"]` only:
+
+- `base: BiometricFusionRulesType`: `acceptThreshold`, `reviewThreshold`, `floors`,
+  `floorDecision`, `required`, `modalityThresholds`, `weights`. The three lists hold
+  `BiometricModalityValueType { modality, value }`. A modality with no configured threshold is
+  absent from `modalityThresholds`; `verify()` uses its provider's default threshold.
+- `profiles: [BiometricRiskProfileType!]!`, sorted by name: `name`, `valid`, `errors` (the §6.8
+  validation messages), `overrides: BiometricRiskProfileOverridesType` (`acceptThreshold`,
+  `reviewThreshold`, `floors`, `floorDecision`, `required`, `modalityThresholds`, as declared) and
+  `effective: BiometricFusionRulesType` (the profile merged onto the base, null when invalid).
+- In `overrides`, only the five profile keys are read. A value of the wrong type is null (numbers,
+  `floorDecision`) or left out (`required` entries that are not strings). `weights` and unknown
+  keys are never shown; `errors` names them.
+
+**Retention policy** (`services.current_retention_policy()`, the row `purge()` applies):
+`templateRetentionDays`, `purgeEnabled`, `activeTemplateRetentionDays`, `purgeActiveEnabled`.
+
+**Erasures.** Nodes `id`, `subjectModel`, `subjectId`, `modalities: [String]`, `erased`
+(JSON counts per modality), `reason`, `erasedBy`, `erasedAt`, newest `erasedAt` first. Arguments:
+`subjectModel`, `subjectId`, `reason`, `erasedBy`, `erasedAt_Gte`, `erasedAt_Lte`, `orderBy`,
+`first`, `after`, `before`, `last`, `offset`; page size capped by `RELAY_CONNECTION_MAX_LIMIT`.
+
+**Chain status.** `audit_chain.record_chain_check(actor=...)` runs `verify_chain()` and stores a
+`BiometricAuditChainCheck` row (`biometric_audit_chain_check`, migration 0003): `checked_at`,
+`checked_by`, `ok`, `checked`, `head_sequence`, `head_hash`, `divergence_kind`,
+`divergence_sequence`, `divergence_detail`. The row is not an audit event, so the head it records
+stays the head it verified. `verifyBiometricAuditChain` (no arguments) calls it with the caller's
+username. `biometricAuditChainStatus` returns the latest row
+(`audit_chain.latest_chain_check()`). Type fields: `id`, `ok`, `checkedAt`, `checkedBy`, `checked`,
+`headSequence`, `headHash`, `divergenceKind` (`missing_event` | `broken_link` | `altered_row`,
+empty when intact), `divergenceSequence` (first divergent sequence, null when intact),
+`divergenceDetail`. The `biometric_audit_verify` command stores no row: a scheduled run of the
+command does not update the status.
