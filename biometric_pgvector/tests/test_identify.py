@@ -79,3 +79,46 @@ class TestPgvectorIdentify(_MultimodalServiceTestCase):
         subject_ids = {m.subject_id for m in matches}
         self.assertIn("s1", subject_ids)
         self.assertNotIn("s2", subject_ids)
+
+
+class TestPgvectorIdentifyPreprocessing(_MultimodalServiceTestCase):
+    """The pgvector query keeps only rows under the provider's preprocessing tag, before LIMIT (§6.13)."""
+
+    def setUp(self):
+        super().setUp()
+        from biometric.providers.fake import FakeEmbeddingProvider
+        from biometric.registry import ProviderRegistry
+
+        class TaggedEmbeddingProvider(FakeEmbeddingProvider):
+            preprocessing = "p1"
+
+        ProviderRegistry.register_modality("face", "fake_embedding", TaggedEmbeddingProvider)
+        BiometricConfig.vector_index = "pgvector"
+
+    def _make_template(self, subject_id, vector, preprocessing):
+        metadata = {"preprocessing": preprocessing} if preprocessing is not None else {}
+        return BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id=subject_id, modality="face",
+            kind="embedding", vector=vector, provider="fake_embedding", model_name="", metadata=metadata,
+        )
+
+    def test_rows_under_another_tag_never_take_a_top_k_place(self):
+        self._make_template("old", [1.0, 0.0], "p0")
+        self._make_template("untagged", [1.0, 0.0], None)
+        self._make_template("new", [0.7, 0.7], "p1")
+
+        matches = identify("face", vector=[1.0, 0.0], top_k=1)
+
+        self.assertEqual([m.subject_id for m in matches], ["new"])
+
+    def test_same_result_as_numpy(self):
+        self._make_template("old", [1.0, 0.0], "p0")
+        self._make_template("a", [0.9, 0.1], "p1")
+        self._make_template("b", [0.1, 0.9], "p1")
+
+        pgvector_matches = identify("face", vector=[1.0, 0.0], top_k=5)
+        BiometricConfig.vector_index = "numpy"
+        numpy_matches = identify("face", vector=[1.0, 0.0], top_k=5)
+
+        self.assertEqual([m.subject_id for m in pgvector_matches], ["a", "b"])
+        self.assertEqual([m.template_id for m in numpy_matches], [m.template_id for m in pgvector_matches])
