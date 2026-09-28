@@ -249,3 +249,24 @@ class TestDevicePathOverGraphQL(_ImpersonationTestCase):
         schema.execute(query, context_value=SimpleNamespace(user=_user()))
         rows = Query.resolve_biometric_verifications(None, _info(_user()), subject_id="alice")
         self.assertEqual([r.impersonation_skip_reason for r in rows], [SKIP_DEVICE_PATH_DISABLED, ""])
+
+    def test_multimodal_leg_device_vector_over_graphql(self):
+        import graphene
+
+        from biometric.schema import Mutation
+
+        self._face("alice", VECTORS[b"alice"])
+        self._face("bob", VECTORS[b"bob"])
+        self._enable(device_path=True)
+        query = (
+            'mutation { verifyBiometricMultimodal(subjectId: "alice", legs: [{modality: "face", deviceScore: 0.9, '
+            "deviceVector: [0.05, 1.0, 0.0]}]) { outcome legs { impersonationSkipReason impersonation { suspected } } } }"
+        )
+
+        result = graphene.Schema(query=Query, mutation=Mutation).execute(
+            query, context_value=SimpleNamespace(user=_user()),
+        )
+
+        self.assertIsNone(result.errors, result.errors)
+        leg = result.data["verifyBiometricMultimodal"]["legs"][0]
+        self.assertEqual(leg, {"impersonationSkipReason": "", "impersonation": {"suspected": True}})
