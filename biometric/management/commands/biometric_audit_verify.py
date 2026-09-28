@@ -1,15 +1,21 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from biometric.audit_chain import check_anchor, verify_chain
+from biometric.audit_chain import check_anchor, store_chain_check, verify_chain
+
+# checked_by of the BiometricAuditChainCheck rows this command stores.
+COMMAND_ACTOR = "biometric_audit_verify"
 
 
 class Command(BaseCommand):
     help = (
         "Walk the biometric audit chain from its first event and report the first "
-        "divergence. Prints the head sequence and hash on every run: store them "
+        "divergence. Stores the walk as the audit chain status (biometricAuditChainStatus). "
+        "Prints the head sequence and hash on every run: store them "
         "outside this database and pass them back as --expected-sequence / "
         "--expected-head, the only check that reveals a truncated tail. The chain "
-        "may have grown since; the event at that sequence must still hold that hash."
+        "may have grown since; the event at that sequence must still hold that hash. "
+        "A recorded head that no longer holds fails the command; the stored status "
+        "covers the walk only."
     )
 
     def add_arguments(self, parser):
@@ -19,6 +25,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         report = verify_chain(batch_size=options["batch_size"])
+        store_chain_check(report, actor=COMMAND_ACTOR)
         if report.divergence is not None:
             divergence = report.divergence
             raise CommandError(

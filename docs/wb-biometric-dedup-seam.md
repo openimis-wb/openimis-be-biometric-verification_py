@@ -910,7 +910,8 @@ of:
 [--expected-sequence N]` prints `biometric audit chain intact over {n} event(s); head sequence {s}
 hash {h}`. It raises `CommandError` on a divergence
 (`biometric audit chain diverges after {checked} event(s): {kind} at sequence {seq}: {detail}`) and
-when a recorded head no longer holds (`audit_chain.check_anchor()`). The expected values are a head
+when a recorded head no longer holds (`audit_chain.check_anchor()`). Each run stores its walk as the
+audit chain status (§6.12). The expected values are a head
 printed by an earlier run; the chain may have grown since. The event at `--expected-sequence` must
 still exist and hold `--expected-head`. Given alone, `--expected-sequence` must not exceed the
 current head sequence and `--expected-head` must be the hash of some event. Sequence 0 with
@@ -1105,8 +1106,15 @@ username. `biometricAuditChainStatus` returns the latest row
 (`audit_chain.latest_chain_check()`). Type fields: `id`, `ok`, `checkedAt`, `checkedBy`, `checked`,
 `headSequence`, `headHash`, `divergenceKind` (`missing_event` | `broken_link` | `altered_row`,
 empty when intact), `divergenceSequence` (first divergent sequence, null when intact),
-`divergenceDetail`. The `biometric_audit_verify` command stores no row: a scheduled run of the
-command does not update the status.
+`divergenceDetail`.
+
+The `biometric_audit_verify` command walks the chain once and stores the walk through
+`audit_chain.store_chain_check()`, the service `record_chain_check()` calls, with `checked_by`
+`"biometric_audit_verify"`, before it prints or raises. A scheduled run therefore updates
+`biometricAuditChainStatus`, a diverging run included (the row is stored, then the command exits
+with its `CommandError`). The row records the walk only: with `--expected-sequence` /
+`--expected-head`, an intact walk whose recorded head no longer holds stores `ok` true and still
+fails the command, so a truncated tail shows in the exit code, not in the status.
 
 ### 6.13 Preprocessing tag
 

@@ -370,9 +370,13 @@ def record_chain_check(*, actor, batch_size: int = 1000):
     row, returned. The row is not an audit event, so the head it records is
     still the head once it is written.
     """
+    return store_chain_check(verify_chain(batch_size=batch_size), actor=actor)
+
+
+def store_chain_check(report: ChainReport, *, actor):
+    """Stores a verify_chain() report as a BiometricAuditChainCheck row, returned; appends no event."""
     from .models import BiometricAuditChainCheck
 
-    report = verify_chain(batch_size=batch_size)
     divergence = report.divergence
     return BiometricAuditChainCheck.objects.create(
         checked_by=str(actor or ""),
