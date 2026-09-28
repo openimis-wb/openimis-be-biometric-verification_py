@@ -45,8 +45,11 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     superseded or written.
 
     With BIOMETRIC["AUDIT"] enabled (§6.10), the supersede, the insert and a
-    template.enrol audit event share one transaction; a refused sample
-    records nothing.
+    template.enrol audit event share one transaction. A sample refused in
+    enforce mode records a template.enrol_refused event (verdict and provider
+    metadata, never the sample or the vector), committed before
+    QualityRefusedError is raised; a caller transaction that rolls back on
+    that error discards it.
 
     subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
     """
@@ -54,7 +57,7 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
 
     from . import crypto
     from .apps import BiometricConfig
-    from .audit_chain import ACTION_ENROL, audited_block, record_event
+    from .audit_chain import ACTION_ENROL, ACTION_ENROL_REFUSED, audited_block, record_event
     from .models import BiometricConsent, BiometricTemplate
     from .quality import REFUSED, assess
     from .quality import mode as quality_mode
@@ -89,6 +92,24 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     )
     if verdict.mode == "enforce" and verdict.status == REFUSED:
         logger.info("enrol(): %s sample refused by the quality gate: %s", modality, verdict.reasons)
+        # The event commits with this block; the error is raised after it.
+        with audited_block():
+            record_event(
+                ACTION_ENROL_REFUSED, actor=actor, subject_model=subject_model, subject_id=subject_id,
+                modality=modality,
+                payload={
+                    "position": position,
+                    "provider": provider.provider_name,
+                    "model_name": model_name,
+                    "kind": provider.kind,
+                    "quality": extracted.quality,
+                    "device_template": device_template is not None,
+                    "quality_status": verdict.status,
+                    "quality_mode": verdict.mode,
+                    "quality_reasons": list(verdict.reasons),
+                    "quality_measures": [m.as_dict() for m in verdict.measures],
+                },
+            )
         raise QualityRefusedError(verdict)
 
     key = BiometricConfig.template_key

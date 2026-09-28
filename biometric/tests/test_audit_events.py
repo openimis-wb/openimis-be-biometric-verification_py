@@ -19,6 +19,7 @@ from biometric.apps import BiometricConfig
 from biometric.audit_chain import (
     ACTION_CONSOLIDATE,
     ACTION_ENROL,
+    ACTION_ENROL_REFUSED,
     ACTION_IDENTIFY,
     ACTION_IMPERSONATION,
     ACTION_PURGE,
@@ -131,15 +132,92 @@ class TestEnrolEvent(_AuditServiceTestCase):
         self.assertTrue(_events(ACTION_ENROL)[0].payload["device_template"])
         self.assertNotIn("device-supplied", json.dumps(_events(ACTION_ENROL)[0].payload))
 
-    def test_enforce_refusal_records_nothing(self):
+    def test_enforce_refusal_records_one_refusal_event_and_no_template(self):
         BiometricConfig.quality = {"mode": "enforce", "modalities": {}}
         device = Extracted(vector=[0.1] * 8, face=FaceGeometry(pose={"roll": 30.0}))
 
         with self.assertRaises(QualityRefusedError):
             enrol(SUBJECT_MODEL, "s1", "face", b"raw", actor="agent", device_template=device)
 
-        self.assertEqual(BiometricAuditEvent.objects.count(), 0)
+        self.assertEqual(BiometricAuditEvent.objects.count(), 1)
+        self.assertEqual(_events(ACTION_ENROL), [])
         self.assertFalse(BiometricTemplate.objects.filter(subject_id="s1").exists())
+        event = _events(ACTION_ENROL_REFUSED)[0]
+        self.assertEqual((event.actor, event.subject_model, event.subject_id, event.modality),
+                         ("agent", SUBJECT_MODEL, "s1", "face"))
+        self.assertEqual(event.payload["quality_status"], "REFUSED")
+        self.assertEqual(event.payload["quality_mode"], "enforce")
+        self.assertEqual(event.payload["quality_reasons"], ["roll_above_max"])
+        roll = [m for m in event.payload["quality_measures"] if m["name"] == "roll"][0]
+        self.assertEqual((roll["value"], roll["limit"], roll["passed"], roll["source"]),
+                         (30.0, 20.0, False, "provider_pose"))
+        self.assertTrue(event.payload["device_template"])
+        self.assertEqual(event.payload["provider"], "fake_embedding")
+        self.assertEqual(event.payload["kind"], "embedding")
+        self.assertEqual(event.payload["position"], "")
+        self.assertFalse(_keys(event.payload) & FORBIDDEN_PAYLOAD_KEYS)
+        self.assertNotIn("0.1", [str(v) for v in _strings(event.payload)])
+
+    def test_server_extracted_image_refusal_records_the_measures(self):
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.fromarray(np.full((64, 64), 128, dtype=np.uint8)).save(buffer, format="PNG")
+        BiometricConfig.quality = {"mode": "enforce"}
+
+        with self.assertRaises(QualityRefusedError) as raised:
+            enrol(SUBJECT_MODEL, "s1", "face", buffer.getvalue(), actor="agent")
+
+        event = _events(ACTION_ENROL_REFUSED)[0]
+        self.assertEqual(event.payload["quality_reasons"], ["sharpness_below_min"])
+        self.assertFalse(event.payload["device_template"])
+        self.assertEqual(event.payload["quality_measures"], raised.exception.verdict.as_dict()["measures"])
+        sharp = [m for m in event.payload["quality_measures"] if m["name"] == "sharpness"][0]
+        self.assertEqual((sharp["value"], sharp["passed"]), (0.0, False))
+        self.assertEqual(event.hash, compute_hash(event, event.prev_hash))
+        self.assertTrue(verify_chain().ok)
+
+    def test_refusal_keeps_the_previous_active_template(self):
+        kept = enrol(SUBJECT_MODEL, "s1", "face", b"photo-1", actor="agent")
+        BiometricConfig.quality = {"mode": "enforce", "modalities": {}}
+        device = Extracted(vector=[0.1] * 8, face=FaceGeometry(pose={"roll": 30.0}))
+
+        with self.assertRaises(QualityRefusedError):
+            enrol(SUBJECT_MODEL, "s1", "face", b"raw", actor="agent", device_template=device)
+
+        kept.refresh_from_db()
+        self.assertIsNone(kept.validity_to)
+        self.assertEqual([e.action for e in _events()], [ACTION_ENROL, ACTION_ENROL_REFUSED])
+
+    def test_refusal_over_graphql_records_the_event(self):
+        import io
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import graphene
+        import numpy as np
+        from PIL import Image
+
+        from biometric.schema import Mutation, Query
+
+        buffer = io.BytesIO()
+        Image.fromarray(np.full((64, 64), 128, dtype=np.uint8)).save(buffer, format="PNG")
+        BiometricConfig.quality = {"mode": "enforce"}
+        user = MagicMock(is_anonymous=False, username="agent")
+        user.has_perms.return_value = True
+        query = 'mutation { enrolBiometric(subjectId: "s1", modality: "face", sample: "%s") { id } }' % (
+            base64.b64encode(buffer.getvalue()).decode()
+        )
+
+        result = graphene.Schema(query=Query, mutation=Mutation).execute(query, context_value=SimpleNamespace(user=user))
+
+        self.assertIsNone(result.data["enrolBiometric"])
+        self.assertEqual(result.errors[0].extensions["code"], "BIOMETRIC_QUALITY_REFUSED")
+        self.assertEqual(len(_events(ACTION_ENROL_REFUSED)), 1)
+        self.assertEqual(_events(ACTION_ENROL_REFUSED)[0].actor, "agent")
 
     def test_event_failure_rolls_back_the_enrolment(self):
         with patch("biometric.audit_chain.record_event", side_effect=RuntimeError("chain down")):
@@ -435,6 +513,18 @@ class TestDefaultUnchanged(_MultimodalServiceTestCase):
 
         self.assertEqual(self._comparable(off), self._comparable(on))
         self.assertGreater(BiometricAuditEvent.objects.count(), 0)
+
+    def test_refusal_with_audit_off_records_nothing(self):
+        self.assertFalse(BiometricConfig.audit.get("enabled"))
+        BiometricConfig.quality = {"mode": "enforce", "modalities": {}}
+        device = Extracted(vector=[0.1] * 8, face=FaceGeometry(pose={"roll": 30.0}))
+
+        with CaptureQueriesContext(connection) as queries:
+            with self.assertRaises(QualityRefusedError):
+                enrol(SUBJECT_MODEL, "s1", "face", b"raw", actor="agent", device_template=device)
+
+        self.assertEqual(len(queries.captured_queries), 0)
+        self.assertEqual(BiometricAuditEvent.objects.count(), 0)
 
     def test_services_module_keeps_lazy_imports(self):
         self.assertFalse(hasattr(services, "record_event"))
