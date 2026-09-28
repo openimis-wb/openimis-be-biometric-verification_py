@@ -491,6 +491,17 @@ def _event_payload_for(action, payload, info):
     return payload
 
 
+def _audit_queryset(queryset, info):
+    """
+    The queryset when the caller holds gql_biometric_audit_perms. Every lookup
+    by relay global id (the root node field) goes through get_queryset, so the
+    audit event, alert and erasure types check the right here as well as in
+    their connection resolvers.
+    """
+    _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+    return queryset
+
+
 class BiometricAuditEventGQLType(DjangoObjectType):
     """One hash-chained audit event. Holds identifiers, scores and counts, never biometric material."""
 
@@ -513,6 +524,10 @@ class BiometricAuditEventGQLType(DjangoObjectType):
             "modality": ["exact"],
             "created_at": ["gte", "lte"],
         }
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return _audit_queryset(queryset, info)
 
     def resolve_payload(self, info):
         return _event_payload_for(self.action, self.payload, info)
@@ -539,6 +554,10 @@ class BiometricAlertGQLType(DjangoObjectType):
             "subject_id": ["exact"],
             "triggered_at": ["gte", "lte"],
         }
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return _audit_queryset(queryset, info)
 
     def resolve_detail(self, info):
         from .audit_rules import IMPERSONATION_SUSPECTED
@@ -705,6 +724,10 @@ class BiometricErasureGQLType(DjangoObjectType):
             "erased_by": ["exact"],
             "erased_at": ["gte", "lte"],
         }
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return _audit_queryset(queryset, info)
 
     def resolve_modalities(self, info):
         return [str(m) for m in self.modalities] if isinstance(self.modalities, list) else []

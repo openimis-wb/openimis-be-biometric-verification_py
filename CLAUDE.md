@@ -94,6 +94,7 @@ The architecture uses a **provider pattern**: DeepFace is the default local prov
 | `biometric/apps.py` | Done | Rights `gql_biometric_config_perms` (174007), `gql_biometric_audit_verify_perms` (174008); `impersonation_probe.device_path` |
 | `biometric/tests/test_multimodal_verify.py` | Done | Each profile key through `verify_multimodal()`, never-loosen grid on that path, up-front validation, mutation arguments and rights |
 | `biometric/tests/test_impersonation_device_path.py` | Done | Skip reasons, opt-in probe on vector and template modalities, signal, multimodal leg, audit payload, GraphQL |
+| `biometric/tests/test_node_rights.py` | Done | Root relay `node` lookups of audit events, alerts and erasures need 174005 |
 | `biometric/tests/test_admin_schema.py` | Done | Rights, decision criteria (whitelisting, no secret), retention, erasures pagination and filters, chain check storage and status |
 
 ---
@@ -151,7 +152,8 @@ openimis-be-biometric_verification_py/
 │       ├── test_deepface_geometry.py ✅ DeepFace face box and landmarks for the quality gate
 │       ├── test_multimodal_verify.py ✅ Multimodal verification under risk profiles
 │       ├── test_impersonation_device_path.py ✅ Device-path impersonation probe and skip reasons
-│       └── test_admin_schema.py ✅ Admin queries and the audit chain check
+│       ├── test_admin_schema.py ✅ Admin queries and the audit chain check
+│       └── test_node_rights.py ✅ Relay node lookups gated on the audit right
 └── CLAUDE.md                  ✅ This file
 ```
 

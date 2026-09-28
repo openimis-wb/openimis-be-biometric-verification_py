@@ -1014,6 +1014,10 @@ grant them to no role.
     lose `matched_subject_model`, `matched_subject_id` and `matched_template_id`.
 
   The stored rows are unchanged.
+- **Relay `node`.** The assembled openIMIS schema declares a root `node` field that resolves a
+  global id through the type's `get_queryset`. `BiometricAuditEventGQLType`,
+  `BiometricAlertGQLType` and `BiometricErasureGQLType` require 174005 there too, so `node`
+  returns a `PermissionDenied` error without it.
 - `identifyBiometric` passes `actor=user.username` to `identify()`, and `biometricTemplates`
   records `template.list` when audit is on. Their arguments and results are unchanged.
 
