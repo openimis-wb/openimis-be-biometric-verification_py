@@ -256,7 +256,8 @@ class TestMultimodalMutation(_MultimodalTestCase):
         self.assertEqual(BiometricVerification.objects.count(), 0)
 
     def test_needs_the_verify_right(self):
-        self.addCleanup(setattr, BiometricConfig, "gql_biometric_verify_perms", BiometricConfig.gql_biometric_verify_perms)
+        original = BiometricConfig.gql_biometric_verify_perms
+        self.addCleanup(setattr, BiometricConfig, "gql_biometric_verify_perms", original)
         BiometricConfig.gql_biometric_verify_perms = ["174002"]
         for user in (_user(anonymous=True), _user(perms=["174004", "174003"])):
             result = self._execute(user=user)

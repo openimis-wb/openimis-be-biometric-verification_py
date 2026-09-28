@@ -212,7 +212,8 @@ class TestEnrolEvent(_AuditServiceTestCase):
             base64.b64encode(buffer.getvalue()).decode()
         )
 
-        result = graphene.Schema(query=Query, mutation=Mutation).execute(query, context_value=SimpleNamespace(user=user))
+        schema = graphene.Schema(query=Query, mutation=Mutation)
+        result = schema.execute(query, context_value=SimpleNamespace(user=user))
 
         self.assertIsNone(result.data["enrolBiometric"])
         self.assertEqual(result.errors[0].extensions["code"], "BIOMETRIC_QUALITY_REFUSED")

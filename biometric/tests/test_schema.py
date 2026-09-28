@@ -672,7 +672,8 @@ class TestImpersonationEvidenceFields(SimpleTestCase):
             TestImpersonationOverGraphQL._row(impersonation_evidence=evidence),
         ]
 
-        probe = Query.resolve_biometric_verifications(None, _make_info(_auth_user()), subject_id="alice")[0].impersonation
+        rows = Query.resolve_biometric_verifications(None, _make_info(_auth_user()), subject_id="alice")
+        probe = rows[0].impersonation
 
         self.assertEqual(probe.top_k, 9)
         exposed = {name for name in BiometricImpersonationProbeType._meta.fields}

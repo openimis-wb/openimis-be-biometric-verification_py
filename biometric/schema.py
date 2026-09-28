@@ -646,7 +646,9 @@ class BiometricRiskProfileType(graphene.ObjectType):
     valid = graphene.Boolean(required=True)
     errors = graphene.List(graphene.NonNull(graphene.String), required=True)
     overrides = graphene.Field(BiometricRiskProfileOverridesType, required=True)
-    effective = graphene.Field(BiometricFusionRulesType, description="The profile merged onto the base; null when invalid.")
+    effective = graphene.Field(
+        BiometricFusionRulesType, description="The profile merged onto the base; null when invalid.",
+    )
 
 
 class BiometricDecisionCriteriaType(graphene.ObjectType):
@@ -748,9 +750,8 @@ class VerifyBiometricAuditChainMutation(graphene.Mutation):
     @classmethod
     def mutate(cls, root, info):
         user = info.context.user
-        _require_perms(
-            user, list(BiometricConfig.gql_biometric_audit_verify_perms) + list(BiometricConfig.gql_biometric_audit_perms),
-        )
+        perms = list(BiometricConfig.gql_biometric_audit_verify_perms) + list(BiometricConfig.gql_biometric_audit_perms)
+        _require_perms(user, perms)
 
         from .audit_chain import record_chain_check
 
@@ -817,7 +818,7 @@ class Query(graphene.ObjectType):
 
     biometric_audit_chain_status = graphene.Field(
         BiometricAuditChainCheckType,
-        description="The last stored audit chain verification; null when none was run through verifyBiometricAuditChain.",
+        description="The last audit chain verification stored by verifyBiometricAuditChain; null before the first.",
     )
 
     @staticmethod
