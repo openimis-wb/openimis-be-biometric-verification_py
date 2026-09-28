@@ -21,6 +21,18 @@ def _decode_sample(sample):
     return base64.b64decode(sample)
 
 
+def _device_template(device_vector, device_template):
+    """Extracted from a device-supplied vector and/or base64 template; None when neither is given."""
+    if device_vector is None and device_template is None:
+        return None
+    from .providers.base import Extracted
+
+    return Extracted(
+        vector=list(device_vector) if device_vector is not None else None,
+        template=_decode_sample(device_template),
+    )
+
+
 def _require_perms(user, perms):
     if user.is_anonymous:
         raise PermissionDenied(_("unauthorized"))
@@ -172,6 +184,12 @@ class BiometricTemplateType(graphene.ObjectType):
     )
 
 
+_SKIP_REASON_DESCRIPTION = (
+    "Why an enabled impersonation probe did not run: provider_matches_on_device, no_device_template "
+    "or device_path_disabled; empty otherwise."
+)
+
+
 class BiometricVerificationRecordType(graphene.ObjectType):
     """One BiometricVerification audit row."""
     id = graphene.String(required=True)
@@ -190,6 +208,7 @@ class BiometricVerificationRecordType(graphene.ObjectType):
     impersonation = graphene.Field(
         BiometricImpersonationProbeType, description="Null when the impersonation probe did not run.",
     )
+    impersonation_skip_reason = graphene.String(description=_SKIP_REASON_DESCRIPTION)
 
 
 class BiometricMatchType(graphene.ObjectType):
@@ -213,6 +232,7 @@ class BiometricVerifyResultType(graphene.ObjectType):
     impersonation = graphene.Field(
         BiometricImpersonationProbeType, description="Null when the impersonation probe did not run.",
     )
+    impersonation_skip_reason = graphene.String(description=_SKIP_REASON_DESCRIPTION)
 
 
 def _verify_result_gql(result, user):
@@ -222,7 +242,13 @@ def _verify_result_gql(result, user):
         modality=result.modality, origin=result.origin, threshold=result.threshold, error=result.error,
         risk_profile=result.risk_profile if isinstance(result.risk_profile, str) else "",
         impersonation=_impersonation_gql(getattr(result, "impersonation", None), user),
+        impersonation_skip_reason=_skip_reason(result),
     )
+
+
+def _skip_reason(source):
+    reason = getattr(source, "impersonation_skip_reason", "")
+    return reason if isinstance(reason, str) else ""
 
 
 class BiometricMultimodalVerifyResultType(graphene.ObjectType):
@@ -240,6 +266,14 @@ class BiometricVerifyLegInput(graphene.InputObjectType):
     sample = graphene.String(required=False, description="Base64-encoded sample (server path).")
     position = graphene.String(required=False)
     device_score = graphene.Float(required=False)
+    device_vector = graphene.List(
+        graphene.NonNull(graphene.Float), required=False,
+        description="Vector the device extracted, ranked by the impersonation probe on the device path.",
+    )
+    device_template = graphene.String(
+        required=False,
+        description="Base64 template the device extracted, ranked by the impersonation probe on the device path.",
+    )
 
 
 class EnrolBiometricMutation(graphene.Mutation):
@@ -287,7 +321,9 @@ class VerifyBiometricMutation(graphene.Mutation):
     Server path (sample given) or device path (deviceScore given).
 
     The impersonation probe runs from configuration only
-    (BIOMETRIC["IMPERSONATION_PROBE"]); no argument turns it off.
+    (BIOMETRIC["IMPERSONATION_PROBE"]); no argument turns it off. On the
+    device path, deviceVector / deviceTemplate give the probe what the device
+    extracted; impersonationSkipReason says why an enabled probe did not run.
 
     An unknown or invalid riskProfile is a GraphQL error, never verified=false:
     UnknownRiskProfileError and RiskProfileError are not caught here.
@@ -307,12 +343,21 @@ class VerifyBiometricMutation(graphene.Mutation):
             required=False,
             description="Named risk profile from BIOMETRIC['RISK_PROFILES']; it may only raise the modality threshold.",
         )
+        device_vector = graphene.List(
+            graphene.NonNull(graphene.Float), required=False,
+            description="Vector the device extracted, ranked by the impersonation probe on the device path.",
+        )
+        device_template = graphene.String(
+            required=False,
+            description="Base64 template the device extracted, ranked by the impersonation probe on the device path.",
+        )
 
     Output = BiometricVerifyResultType
 
     @classmethod
     def mutate(cls, root, info, subject_id, modality, subject_model=None, sample=None, position=None,
-               device_score=None, fallback=False, device_id="", context=None, risk_profile=None):
+               device_score=None, fallback=False, device_id="", context=None, risk_profile=None,
+               device_vector=None, device_template=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
 
@@ -322,6 +367,7 @@ class VerifyBiometricMutation(graphene.Mutation):
             subject_model, subject_id, modality, sample=_decode_sample(sample), position=position,
             device_score=device_score, fallback=bool(fallback), context=context,
             device_id=device_id or "", actor=user.username, risk_profile=risk_profile or None,
+            device_template=_device_template(device_vector, device_template),
         )
         return _verify_result_gql(result, user)
 
@@ -367,6 +413,9 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
                 service_leg["device_score"] = leg.device_score
             if leg.position:
                 service_leg["position"] = leg.position
+            device_template = _device_template(leg.device_vector, leg.device_template)
+            if device_template is not None:
+                service_leg["device_template"] = device_template
             service_legs.append(service_leg)
 
         result = verify_multimodal(
@@ -669,7 +718,7 @@ class Query(graphene.ObjectType):
                 modality=row.modality, score=row.score, threshold=row.threshold, verified=row.verified,
                 origin=row.origin, fallback=row.fallback, device_id=row.device_id,
                 actor=row.actor, created_at=row.created_at, risk_profile=row.risk_profile,
-                impersonation=_impersonation_gql(row, user),
+                impersonation=_impersonation_gql(row, user), impersonation_skip_reason=_skip_reason(row),
             )
             for row in rows
         ]

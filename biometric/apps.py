@@ -43,7 +43,9 @@ DEFAULT_CFG = {
     "risk_profiles": {},
     # 1:N impersonation probe inside verify() (biometric/impersonation.py).
     # Nested keys are lowercase; missing keys take PROBE_DEFAULTS at read time.
-    "impersonation_probe": {"enabled": False, "modalities": ["face"], "top_k": 5, "thresholds": {}, "margin": None},
+    "impersonation_probe": {
+        "enabled": False, "modalities": ["face"], "top_k": 5, "thresholds": {}, "margin": None, "device_path": False,
+    },
     # Hash-chained audit events and alert rules (biometric/audit_chain.py,
     # biometric/audit_rules.py). Nested keys are lowercase; "rules" overrides
     # audit_rules.DEFAULT_RULES per kind, key by key.
@@ -114,7 +116,9 @@ class BiometricConfig(AppConfig):
     # required / modality_thresholds; each value may only equal or tighten
     # the base in fusion and modalities.
     risk_profiles = {}
-    impersonation_probe = {"enabled": False, "modalities": ["face"], "top_k": 5, "thresholds": {}, "margin": None}
+    impersonation_probe = {
+        "enabled": False, "modalities": ["face"], "top_k": 5, "thresholds": {}, "margin": None, "device_path": False,
+    }
     audit = {"enabled": False, "rules": {}}
     gql_biometric_enrol_perms = ["174001"]
     gql_biometric_verify_perms = ["174002"]

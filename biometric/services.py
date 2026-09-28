@@ -172,7 +172,8 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
 
 
 def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, position=None,
-           device_score=None, fallback=False, context=None, device_id="", actor, risk_profile=None):
+           device_score=None, fallback=False, context=None, device_id="", actor, risk_profile=None,
+           device_template=None):
     """
     Server path: extract the probe, compare with every active template of the
     subject for this modality (and position, if given), keep the best score.
@@ -189,7 +190,11 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     (biometric/impersonation.py, §6.9). Its outcome is recorded on the row and
     returned as result.impersonation; score, threshold and verified are never
     changed by it. A suspicion emits biometric.impersonation_suspected after
-    commit. An unknown name raises UnknownRiskProfileError, and a
+    commit. On the device path the probe ranks device_template (an Extracted
+    carrying the device's vector or template) only when
+    IMPERSONATION_PROBE["device_path"] is true; an enabled probe that does not
+    run records its reason as impersonation_skip_reason. device_template on
+    the server path raises ValueError. An unknown name raises UnknownRiskProfileError, and a
     malformed or looser profile RiskProfileError, before extraction and before
     any row is written.
 
@@ -208,6 +213,8 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
 
     if subject_id is None or modality is None:
         raise TypeError("verify() requires subject_id and modality.")
+    if device_template is not None and device_score is None:
+        raise ValueError("verify(): device_template applies to the device path only (device_score).")
 
     subject_model = subject_model or BiometricConfig.subject_model
     subject_id = str(subject_id)
@@ -224,10 +231,15 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         threshold = verify_threshold(risk_profile, modality, threshold)
 
     probe = None
+    skip_reason = ""
     if device_score is not None:
         origin = "device"
         score = device_score
         verified = score >= threshold
+
+        from .impersonation import device_path_probe
+
+        probe, skip_reason = device_path_probe(subject_model, subject_id, modality, provider, device_template)
     else:
         origin = "server"
         if sample is None:
@@ -283,7 +295,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
             subject_model=subject_model, subject_id=subject_id, modality=modality,
             score=score, threshold=threshold, verified=verified, origin=origin,
             fallback=fallback, context=context, device_id=device_id or "", actor=actor,
-            risk_profile=risk_profile or "", **impersonation_fields,
+            risk_profile=risk_profile or "", impersonation_skip_reason=skip_reason, **impersonation_fields,
         )
         record_event(
             ACTION_VERIFY, actor=actor, subject_model=subject_model, subject_id=subject_id, modality=modality,
@@ -299,6 +311,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
                 "risk_profile": risk_profile or "",
                 "impersonation_status": probe.status if probe is not None else "",
                 "impersonation_suspected": bool(probe is not None and probe.suspected),
+                "impersonation_skip_reason": skip_reason,
             },
         )
         if probe is not None and probe.suspected:
@@ -349,10 +362,11 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         threshold=threshold,
         risk_profile=risk_profile or "",
         impersonation=probe,
+        impersonation_skip_reason=skip_reason,
     )
 
 
-_LEG_KEYS = frozenset({"modality", "sample", "position", "device_score"})
+_LEG_KEYS = frozenset({"modality", "sample", "position", "device_score", "device_template"})
 
 
 def _check_legs(legs):
@@ -376,6 +390,8 @@ def _check_legs(legs):
         has_score = leg.get("device_score") is not None
         if has_sample == has_score:
             raise ValueError(f"Leg '{modality}' needs exactly one of sample and device_score.")
+        if leg.get("device_template") is not None and not has_score:
+            raise ValueError(f"Leg '{modality}': device_template goes with device_score only.")
 
 
 def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=False, context=None,
@@ -383,8 +399,9 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
     """
     Verify one subject on several modalities and fuse the leg scores.
 
-    legs is a list of {"modality", "sample" | "device_score", "position"?},
-    one per modality. Each leg runs verify() with the same risk_profile,
+    legs is a list of {"modality", "sample" | "device_score", "position"?,
+    "device_template"?}, one per modality; device_template goes with
+    device_score only. Each leg runs verify() with the same risk_profile,
     fallback, context, device_id and actor, and records its own
     BiometricVerification row. fuse() then combines the leg scores under the
     configured BIOMETRIC["FUSION"] rules and the same profile, so every
@@ -412,7 +429,8 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
         verify(
             subject_model, subject_id, leg["modality"],
             sample=leg.get("sample"), position=leg.get("position"), device_score=leg.get("device_score"),
-            fallback=fallback, context=context, device_id=device_id, actor=actor, risk_profile=risk_profile,
+            device_template=leg.get("device_template"), fallback=fallback, context=context,
+            device_id=device_id, actor=actor, risk_profile=risk_profile,
         )
         for leg in legs
     ]

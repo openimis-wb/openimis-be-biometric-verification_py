@@ -129,6 +129,10 @@ class TestLegsAndRecords(_MultimodalTestCase):
             "duplicate modality": _legs(0.5) + _legs(0.6),
             "neither sample nor score": [{"modality": "face"}],
             "both sample and score": [{"modality": "face", "sample": b"x", "device_score": 1.0}],
+            "device template with a sample": _legs(fingerprint=50.0) + [
+                {"modality": "face", "sample": b"x", "device_template": object()},
+            ],
+            "unknown key": [{"modality": "face", "device_score": 1.0, "weights": {"face": 9}}],
         }
         for name, legs in cases.items():
             with self.subTest(name):

@@ -16,6 +16,7 @@ class VerificationResult:
     error: Optional[str] = None
     risk_profile: str = ""       # the named profile the threshold was resolved under, "" for the base
     impersonation: Optional[Any] = None  # impersonation.ImpersonationProbe, None when the probe did not run
+    impersonation_skip_reason: str = ""  # impersonation.SKIP_REASONS entry when an enabled probe did not run
 
 
 @dataclass

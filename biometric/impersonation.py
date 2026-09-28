@@ -7,17 +7,21 @@ of its modality, and a foreign subject scoring at or above the probe
 threshold is reported as a possible impersonation. The probe never changes
 the 1:1 score, threshold or verdict.
 
+On the device-reported path (a device score, no sample) the probe ranks what
+the device extracted, and only when "device_path" is true: device_path_probe()
+returns the probe, or the reason an enabled probe did not run.
+
 Configured under BIOMETRIC["IMPERSONATION_PROBE"]; nested keys are lowercase:
 
     {"enabled": False, "modalities": ["face"], "top_k": 5,
-     "thresholds": {}, "margin": None}
+     "thresholds": {}, "margin": None, "device_path": False}
 """
 
 import logging
 import traceback
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,14 @@ PROBE_DEFAULTS = {
     "top_k": 5,
     "thresholds": {},
     "margin": None,
+    "device_path": False,
 }
+
+# Why an enabled probe did not run on the device path, in the order they are checked.
+SKIP_PROVIDER_MATCHES_ON_DEVICE = "provider_matches_on_device"   # the provider has no server-side match()
+SKIP_NO_DEVICE_TEMPLATE = "no_device_template"                   # the device sent no vector / template
+SKIP_DEVICE_PATH_DISABLED = "device_path_disabled"               # IMPERSONATION_PROBE["device_path"] is off
+SKIP_REASONS = (SKIP_PROVIDER_MATCHES_ON_DEVICE, SKIP_NO_DEVICE_TEMPLATE, SKIP_DEVICE_PATH_DISABLED)
 
 
 def probe_settings() -> Dict[str, Any]:
@@ -125,6 +136,34 @@ def maybe_probe(subject_model, subject_id, modality, provider, extracted) -> Opt
             status=STATUS_FAILED, suspected=False, threshold=threshold, margin=margin, top_k=top_k,
             claimed_score=None, best_match=None, candidates=[], error=error,
         )
+
+
+def device_path_probe(subject_model, subject_id, modality, provider, device_template
+                      ) -> Tuple[Optional[ImpersonationProbe], str]:
+    """
+    (probe, skip reason) for a device-path verify() of (subject_model, subject_id).
+    (None, "") when the probe is disabled or the modality is not listed.
+    Otherwise the first reason that applies, in SKIP_REASONS order: a
+    DeviceReportedMatcher cannot rank the gallery on the server; the device
+    supplied no vector (embedding kind) or template (template kind);
+    "device_path" is off. When none applies, maybe_probe() ranks the device's
+    vector or template exactly as it ranks a server extraction.
+    """
+    from .providers.device_reported import DeviceReportedMatcher
+
+    settings = probe_settings()
+    if not settings.get("enabled") or modality not in (settings.get("modalities") or []):
+        return None, ""
+    if isinstance(provider, DeviceReportedMatcher):
+        return None, SKIP_PROVIDER_MATCHES_ON_DEVICE
+    supplied = None
+    if device_template is not None:
+        supplied = device_template.vector if provider.kind == "embedding" else device_template.template
+    if supplied is None:
+        return None, SKIP_NO_DEVICE_TEMPLATE
+    if not settings.get("device_path"):
+        return None, SKIP_DEVICE_PATH_DISABLED
+    return maybe_probe(subject_model, subject_id, modality, provider, device_template), ""
 
 
 def failure_error(exc: BaseException) -> str:
