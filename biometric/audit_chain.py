@@ -362,3 +362,32 @@ def check_anchor(report: ChainReport, *, sequence: Optional[int] = None,
             "the tail was truncated or rewritten"
         )
     return None
+
+
+def record_chain_check(*, actor, batch_size: int = 1000):
+    """
+    Runs verify_chain() and stores its outcome as a BiometricAuditChainCheck
+    row, returned. The row is not an audit event, so the head it records is
+    still the head once it is written.
+    """
+    from .models import BiometricAuditChainCheck
+
+    report = verify_chain(batch_size=batch_size)
+    divergence = report.divergence
+    return BiometricAuditChainCheck.objects.create(
+        checked_by=str(actor or ""),
+        ok=report.ok,
+        checked=report.checked,
+        head_sequence=report.head_sequence,
+        head_hash=report.head_hash,
+        divergence_kind=divergence.kind if divergence else "",
+        divergence_sequence=divergence.sequence if divergence else None,
+        divergence_detail=divergence.detail if divergence else "",
+    )
+
+
+def latest_chain_check():
+    """The most recent BiometricAuditChainCheck, or None when the chain was never checked this way."""
+    from .models import BiometricAuditChainCheck
+
+    return BiometricAuditChainCheck.objects.order_by("-checked_at", "-id").first()

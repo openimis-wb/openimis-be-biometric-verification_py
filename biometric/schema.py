@@ -9,7 +9,7 @@ from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
 
 from .apps import BiometricConfig
-from .models import BiometricAlert, BiometricAuditEvent
+from .models import BiometricAlert, BiometricAuditEvent, BiometricErasure
 
 
 def _decode_sample(sample):
@@ -589,6 +589,173 @@ class ResolveBiometricAlertMutation(graphene.Mutation):
 
 
 # ---------------------------------------------------------------------------
+# Admin surface: decision criteria, retention, erasures, chain status
+# (docs/wb-biometric-dedup-seam.md §6.12)
+# ---------------------------------------------------------------------------
+
+class BiometricModalityValueType(graphene.ObjectType):
+    """One per-modality number (a floor, a threshold or a weight); value is null when not a finite number."""
+    modality = graphene.String(required=True)
+    value = graphene.Float()
+
+
+def _modality_values(mapping):
+    return [BiometricModalityValueType(modality=m, value=v) for m, v in sorted((mapping or {}).items())]
+
+
+class BiometricFusionRulesType(graphene.ObjectType):
+    """Fusion rules: accept / review bands, floors, the floor decision, required legs and per-modality values."""
+    accept_threshold = graphene.Float()
+    review_threshold = graphene.Float()
+    floors = graphene.List(graphene.NonNull(BiometricModalityValueType), required=True)
+    floor_decision = graphene.String()
+    required = graphene.List(graphene.NonNull(graphene.String), required=True)
+    modality_thresholds = graphene.List(graphene.NonNull(BiometricModalityValueType), required=True)
+    weights = graphene.List(graphene.NonNull(BiometricModalityValueType), required=True)
+
+
+def _fusion_rules_type(rules):
+    if rules is None:
+        return None
+    return BiometricFusionRulesType(
+        accept_threshold=rules["thresholds"].get("accept"),
+        review_threshold=rules["thresholds"].get("review"),
+        floors=_modality_values(rules["floors"]),
+        floor_decision=rules["floor_decision"],
+        required=list(rules["required"]),
+        modality_thresholds=_modality_values(rules["modality_thresholds"]),
+        weights=_modality_values(rules["weights"]),
+    )
+
+
+class BiometricRiskProfileOverridesType(graphene.ObjectType):
+    """The keys a profile declares; absent keys are null or empty. Values that are not of the expected type are null."""
+    accept_threshold = graphene.Float()
+    review_threshold = graphene.Float()
+    floors = graphene.List(graphene.NonNull(BiometricModalityValueType), required=True)
+    floor_decision = graphene.String()
+    required = graphene.List(graphene.NonNull(graphene.String), required=True)
+    modality_thresholds = graphene.List(graphene.NonNull(BiometricModalityValueType), required=True)
+
+
+class BiometricRiskProfileType(graphene.ObjectType):
+    """One named risk profile, its validation errors and the rules it resolves to."""
+    name = graphene.String(required=True)
+    valid = graphene.Boolean(required=True)
+    errors = graphene.List(graphene.NonNull(graphene.String), required=True)
+    overrides = graphene.Field(BiometricRiskProfileOverridesType, required=True)
+    effective = graphene.Field(BiometricFusionRulesType, description="The profile merged onto the base; null when invalid.")
+
+
+class BiometricDecisionCriteriaType(graphene.ObjectType):
+    """The base fusion rules and every configured risk profile (docs/wb-biometric-dedup-seam.md §6.8)."""
+    base = graphene.Field(BiometricFusionRulesType, required=True)
+    profiles = graphene.List(graphene.NonNull(BiometricRiskProfileType), required=True)
+
+
+def _decision_criteria_type(criteria):
+    profiles = []
+    for profile in criteria["profiles"]:
+        overrides = profile["overrides"]
+        thresholds = overrides.get("thresholds") or {}
+        profiles.append(BiometricRiskProfileType(
+            name=profile["name"],
+            valid=profile["valid"],
+            errors=list(profile["errors"]),
+            overrides=BiometricRiskProfileOverridesType(
+                accept_threshold=thresholds.get("accept"),
+                review_threshold=thresholds.get("review"),
+                floors=_modality_values(overrides.get("floors")),
+                floor_decision=overrides.get("floor_decision"),
+                required=list(overrides.get("required") or []),
+                modality_thresholds=_modality_values(overrides.get("modality_thresholds")),
+            ),
+            effective=_fusion_rules_type(profile["effective"]),
+        ))
+    return BiometricDecisionCriteriaType(base=_fusion_rules_type(criteria["base"]), profiles=profiles)
+
+
+class BiometricRetentionPolicyType(graphene.ObjectType):
+    """The retention policy purge() applies (docs/wb-biometric-dedup-seam.md §6.3)."""
+    template_retention_days = graphene.Int()
+    purge_enabled = graphene.Boolean(required=True)
+    active_template_retention_days = graphene.Int()
+    purge_active_enabled = graphene.Boolean(required=True)
+
+
+class BiometricErasureGQLType(DjangoObjectType):
+    """A tombstone left when a subject's templates were erased; counts per modality, no biometric material."""
+
+    modalities = graphene.List(graphene.String)
+    erased = graphene.JSONString()
+
+    class Meta:
+        model = BiometricErasure
+        interfaces = (graphene.relay.Node,)
+        connection_class = ExtendedConnection
+        fields = ("id", "subject_model", "subject_id", "modalities", "erased", "reason", "erased_by", "erased_at")
+        filter_fields = {
+            "subject_model": ["exact"],
+            "subject_id": ["exact"],
+            "reason": ["exact"],
+            "erased_by": ["exact"],
+            "erased_at": ["gte", "lte"],
+        }
+
+    def resolve_modalities(self, info):
+        return [str(m) for m in self.modalities] if isinstance(self.modalities, list) else []
+
+    def resolve_erased(self, info):
+        return dict(self.erased) if isinstance(self.erased, dict) else {}
+
+
+class BiometricAuditChainCheckType(graphene.ObjectType):
+    """The stored outcome of one audit chain verification (docs/wb-biometric-dedup-seam.md §6.10)."""
+    id = graphene.String(required=True)
+    ok = graphene.Boolean(required=True)
+    checked_at = graphene.DateTime(required=True)
+    checked_by = graphene.String(required=True)
+    checked = graphene.Int(required=True, description="Events verified before the divergence, or all when intact.")
+    head_sequence = graphene.Int(required=True)
+    head_hash = graphene.String(required=True)
+    divergence_kind = graphene.String(description="missing_event | broken_link | altered_row; empty when intact.")
+    divergence_sequence = graphene.Int(description="Sequence of the first divergence; null when intact.")
+    divergence_detail = graphene.String()
+
+
+def _chain_check_type(check):
+    if check is None:
+        return None
+    return BiometricAuditChainCheckType(
+        id=str(check.id), ok=check.ok, checked_at=check.checked_at, checked_by=check.checked_by,
+        checked=check.checked, head_sequence=check.head_sequence, head_hash=check.head_hash,
+        divergence_kind=check.divergence_kind, divergence_sequence=check.divergence_sequence,
+        divergence_detail=check.divergence_detail,
+    )
+
+
+class VerifyBiometricAuditChainMutation(graphene.Mutation):
+    """
+    Walks the audit chain and stores the outcome read by biometricAuditChainStatus.
+    Needs gql_biometric_audit_verify_perms and gql_biometric_audit_perms: the
+    result is the data the status query shows.
+    """
+
+    Output = BiometricAuditChainCheckType
+
+    @classmethod
+    def mutate(cls, root, info):
+        user = info.context.user
+        _require_perms(
+            user, list(BiometricConfig.gql_biometric_audit_verify_perms) + list(BiometricConfig.gql_biometric_audit_perms),
+        )
+
+        from .audit_chain import record_chain_check
+
+        return _chain_check_type(record_chain_check(actor=user.username))
+
+
+# ---------------------------------------------------------------------------
 # Root types — registered by the openIMIS schema aggregator
 # ---------------------------------------------------------------------------
 
@@ -631,6 +798,61 @@ class Query(graphene.ObjectType):
         open=graphene.Boolean(description="True: NEW or ACKNOWLEDGED only."),
         description="Alerts raised by the audit rules, newest first.",
     )
+
+    biometric_decision_criteria = graphene.Field(
+        BiometricDecisionCriteriaType, description="Base fusion rules and the named risk profiles.",
+    )
+
+    biometric_retention_policy = graphene.Field(
+        BiometricRetentionPolicyType, description="The retention policy purge() applies; null when none is set.",
+    )
+
+    biometric_erasures = OrderedDjangoFilterConnectionField(
+        BiometricErasureGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        description="Erasure tombstones, newest first.",
+    )
+
+    biometric_audit_chain_status = graphene.Field(
+        BiometricAuditChainCheckType,
+        description="The last stored audit chain verification; null when none was run through verifyBiometricAuditChain.",
+    )
+
+    @staticmethod
+    def resolve_biometric_decision_criteria(root, info):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_config_perms)
+
+        from .risk_profiles import decision_criteria
+
+        return _decision_criteria_type(decision_criteria())
+
+    @staticmethod
+    def resolve_biometric_retention_policy(root, info):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_config_perms)
+
+        from .services import current_retention_policy
+
+        policy = current_retention_policy()
+        if policy is None:
+            return None
+        return BiometricRetentionPolicyType(
+            template_retention_days=policy.template_retention_days, purge_enabled=policy.purge_enabled,
+            active_template_retention_days=policy.active_template_retention_days,
+            purge_active_enabled=policy.purge_active_enabled,
+        )
+
+    @staticmethod
+    def resolve_biometric_erasures(root, info, **kwargs):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        return BiometricErasure.objects.order_by("-erased_at", "-id")
+
+    @staticmethod
+    def resolve_biometric_audit_chain_status(root, info):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+
+        from .audit_chain import latest_chain_check
+
+        return _chain_check_type(latest_chain_check())
 
     @staticmethod
     def resolve_biometric_audit_events(root, info, **kwargs):
@@ -731,3 +953,4 @@ class Mutation(graphene.ObjectType):
     record_biometric_consent = RecordBiometricConsentMutation.Field()
     acknowledge_biometric_alert = AcknowledgeBiometricAlertMutation.Field()
     resolve_biometric_alert = ResolveBiometricAlertMutation.Field()
+    verify_biometric_audit_chain = VerifyBiometricAuditChainMutation.Field()

@@ -338,3 +338,75 @@ def verify_threshold(risk_profile: str, modality: str, base_threshold: float) ->
     if profile_value is None:
         return base_threshold
     return max(base_threshold, profile_value)
+
+
+def _numbers_by_modality(value) -> Dict[str, Optional[float]]:
+    """{modality: number or None} from a dict; non-string keys and non-dict values give {}."""
+    if not isinstance(value, dict):
+        return {}
+    return {m: _as_number(v) for m, v in value.items() if isinstance(m, str)}
+
+
+def _declared_overrides(overrides) -> dict:
+    """
+    The profile keys a screen may show, each value reduced to the type it
+    must have: numbers (None when not a finite number), a floor decision among
+    FLOOR_DECISIONS (else None), modality-name strings. Other keys are dropped.
+    """
+    if not isinstance(overrides, dict):
+        return {}
+    declared = {}
+    thresholds = overrides.get("thresholds")
+    if isinstance(thresholds, dict):
+        declared["thresholds"] = {k: _as_number(thresholds[k]) for k in ("accept", "review") if k in thresholds}
+    if "floors" in overrides:
+        declared["floors"] = _numbers_by_modality(overrides["floors"])
+    if "floor_decision" in overrides:
+        value = overrides["floor_decision"]
+        declared["floor_decision"] = value if value in FLOOR_DECISIONS else None
+    if "required" in overrides:
+        value = overrides["required"]
+        declared["required"] = [m for m in value if isinstance(m, str)] if isinstance(value, (list, tuple)) else []
+    if "modality_thresholds" in overrides:
+        declared["modality_thresholds"] = _numbers_by_modality(overrides["modality_thresholds"])
+    return declared
+
+
+def _rules_dict(rules: FusionRules, weights: Dict[str, Optional[float]]) -> dict:
+    return {
+        "thresholds": {k: _as_number(rules.thresholds.get(k)) for k in ("accept", "review")},
+        "floors": _numbers_by_modality(rules.floors),
+        "floor_decision": rules.floor_decision if isinstance(rules.floor_decision, str) else None,
+        "required": sorted(m for m in rules.required if isinstance(m, str)),
+        "modality_thresholds": _numbers_by_modality(rules.modality_thresholds),
+        "weights": dict(weights),
+    }
+
+
+def decision_criteria() -> dict:
+    """
+    The configured decision rules for an admin screen, restricted to the
+    fusion and profile keys: {"base": rules, "profiles": [...]} with each
+    profile as {"name", "valid", "errors", "overrides", "effective"} sorted by
+    name. effective is the profile merged onto the base, None for an invalid
+    profile. No other configuration value (provider settings, keys) is read.
+    """
+    from .apps import BiometricConfig
+
+    fusion = BiometricConfig.fusion if isinstance(BiometricConfig.fusion, dict) else {}
+    base = base_rules(fusion=fusion, modalities=BiometricConfig.modalities)
+    weights = _numbers_by_modality(fusion.get("weights") or {})
+
+    profiles = BiometricConfig.risk_profiles if isinstance(BiometricConfig.risk_profiles, dict) else {}
+    described = []
+    for name in sorted(profiles, key=str):
+        overrides = profiles[name]
+        errors = profile_errors(name, overrides, base=base)
+        described.append({
+            "name": str(name),
+            "valid": not errors,
+            "errors": errors,
+            "overrides": _declared_overrides(overrides),
+            "effective": None if errors else _rules_dict(tighten(base, overrides, name), weights),
+        })
+    return {"base": _rules_dict(base, weights), "profiles": described}

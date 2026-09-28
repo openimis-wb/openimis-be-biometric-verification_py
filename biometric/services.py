@@ -918,6 +918,13 @@ def _erase(stale, *, reason, actor):
     return tombstones[-1]
 
 
+def current_retention_policy():
+    """The BiometricRetentionPolicy row purge() applies, or None when there is none."""
+    from .models import BiometricRetentionPolicy
+
+    return BiometricRetentionPolicy.objects.first()
+
+
 def purge(now=None, *, actor="retention"):
     """
     Erase templates past retention. Two independent, off-by-default passes:
@@ -933,9 +940,9 @@ def purge(now=None, *, actor="retention"):
     """
     from django.utils import timezone
 
-    from .models import BiometricRetentionPolicy, BiometricTemplate
+    from .models import BiometricTemplate
 
-    policy = BiometricRetentionPolicy.objects.first()
+    policy = current_retention_policy()
     if policy is None:
         return None
 

@@ -56,6 +56,8 @@ DEFAULT_CFG = {
     "gql_biometric_read_perms": ["174004"],
     "gql_biometric_audit_perms": ["174005"],   # read audit events and alerts
     "gql_biometric_alert_perms": ["174006"],   # acknowledge and resolve alerts
+    "gql_biometric_config_perms": ["174007"],  # read decision criteria and the retention policy
+    "gql_biometric_audit_verify_perms": ["174008"],  # run the audit chain verification (with 174005)
 }
 
 # Maps uppercase Django settings keys -> lowercase ModuleConfiguration keys.
@@ -77,6 +79,8 @@ _SETTINGS_KEY_MAP = {
     "GQL_BIOMETRIC_READ_PERMS": "gql_biometric_read_perms",
     "GQL_BIOMETRIC_AUDIT_PERMS": "gql_biometric_audit_perms",
     "GQL_BIOMETRIC_ALERT_PERMS": "gql_biometric_alert_perms",
+    "GQL_BIOMETRIC_CONFIG_PERMS": "gql_biometric_config_perms",
+    "GQL_BIOMETRIC_AUDIT_VERIFY_PERMS": "gql_biometric_audit_verify_perms",
 }
 
 
@@ -126,6 +130,8 @@ class BiometricConfig(AppConfig):
     gql_biometric_read_perms = ["174004"]
     gql_biometric_audit_perms = ["174005"]
     gql_biometric_alert_perms = ["174006"]
+    gql_biometric_config_perms = ["174007"]
+    gql_biometric_audit_verify_perms = ["174008"]
 
     def __load_config(self, cfg):
         for field, value in cfg.items():
