@@ -1097,6 +1097,7 @@ Read-only views of the configuration and the retention and audit state. No field
 | `biometricDecisionCriteria` | query | 174007 | `BiometricDecisionCriteriaType` |
 | `biometricRetentionPolicy` | query | 174007 | `BiometricRetentionPolicyType`, null without a policy row |
 | `biometricErasures` | relay connection | 174005 | `BiometricErasureGQLType` nodes |
+| `biometricErasureFilterValues` | query | 174005 | `BiometricErasureFilterValuesType` |
 | `biometricAuditChainStatus` | query | 174005 | `BiometricAuditChainCheckType`, null before the first check |
 | `verifyBiometricAuditChain` | mutation | 174008 and 174005 | `BiometricAuditChainCheckType` |
 
@@ -1122,6 +1123,11 @@ the numeric `MODALITIES[m]["threshold"]` values and `BIOMETRIC["RISK_PROFILES"]`
 (JSON counts per modality), `reason`, `erasedBy`, `erasedAt`, newest `erasedAt` first. Arguments:
 `subjectModel`, `subjectId`, `reason`, `erasedBy`, `erasedAt_Gte`, `erasedAt_Lte`, `orderBy`,
 `first`, `after`, `before`, `last`, `offset`; page size capped by `RELAY_CONNECTION_MAX_LIMIT`.
+
+**Erasure filter values.** `biometricErasureFilterValues` (no arguments) returns
+`BiometricErasureFilterValuesType { erasedBy: [String!]!, subjectModel: [String!]! }`: the distinct
+`erased_by` and `subject_model` values of `BiometricErasure`, each sorted ascending and cut to the
+first `schema.ERASURE_FILTER_VALUES_LIMIT` (200) in that order. Distinct, sort and cut run in SQL.
 
 **Chain status.** `audit_chain.record_chain_check(actor=...)` runs `verify_chain()` and stores a
 `BiometricAuditChainCheck` row (`biometric_audit_chain_check`, migration 0003): `checked_at`,
@@ -1186,3 +1192,23 @@ under another tag stays stored and inert: re-enrolling the subject supersedes it
 active key (subject, modality, position, provider, model name) does not include the tag. A provider
 whose preprocessing changes changes its tag, and every template recorded under the old tag stops
 matching until it is re-enrolled.
+
+### 6.14 Verification records
+
+`biometricVerifications(subjectId!, subjectModel)` keeps its shape: a list for one subject. The
+records across subjects are read through a relay connection, right `gql_biometric_read_perms`
+(174004), newest `createdAt` first, page size capped by `RELAY_CONNECTION_MAX_LIMIT`:
+
+- `biometricVerificationRecords`, node `BiometricVerificationGQLType`: `id`, `subjectModel`,
+  `subjectId`, `modality`, `score`, `threshold`, `verified`, `origin`, `fallback`, `deviceId`,
+  `actor`, `createdAt`, `riskProfile`, `impersonation` (`BiometricImpersonationProbeType`, with
+  `topK`; §6.9), `impersonationSkipReason`, `templateSkipReason` (§6.13).
+- Arguments: `subjectModel`, `subjectId`, `modality`, `suspected` (true: rows whose probe suspected
+  someone; false: the others), `createdAt_Gte`, `createdAt_Lte`, `orderBy`, `first`, `after`,
+  `before`, `last`, `offset`.
+- `impersonation` strips `matchedSubjectModel`, `matchedSubjectId` and `candidates` without
+  `gql_biometric_identify_perms` (174003), as on `biometricVerifications`. The caller's `context`,
+  the raw `impersonation_evidence` and the `impersonation_subject_*` columns are not fields.
+- The root `node` lookup of `BiometricVerificationGQLType` needs 174004 as well.
+
+`biometricMultimodalDecisions` (§6.11) reads the stored multimodal decisions under the same right.

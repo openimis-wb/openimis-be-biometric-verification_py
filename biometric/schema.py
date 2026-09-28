@@ -9,7 +9,13 @@ from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
 
 from .apps import BiometricConfig
-from .models import BiometricAlert, BiometricAuditEvent, BiometricErasure, BiometricMultimodalDecision
+from .models import (
+    BiometricAlert,
+    BiometricAuditEvent,
+    BiometricErasure,
+    BiometricMultimodalDecision,
+    BiometricVerification,
+)
 
 
 def _decode_sample(sample):
@@ -803,6 +809,10 @@ class VerifyBiometricAuditChainMutation(graphene.Mutation):
 # Verification records (docs/wb-biometric-dedup-seam.md §6.11, §6.14)
 # ---------------------------------------------------------------------------
 
+# Values returned per list by biometricErasureFilterValues, first in sort order.
+ERASURE_FILTER_VALUES_LIMIT = 200
+
+
 def _read_queryset(queryset, info):
     """
     The queryset when the caller holds gql_biometric_read_perms, the right of
@@ -851,6 +861,54 @@ class BiometricMultimodalDecisionGQLType(DjangoObjectType):
         return [str(v) for v in self.verification_ids if v is not None]
 
 
+class BiometricVerificationGQLType(DjangoObjectType):
+    """
+    One BiometricVerification row. The probe's evidence is read through
+    impersonation, which strips other subjects' identities without the
+    identify rights; the raw evidence, the matched subject columns and the
+    caller's context are not exposed.
+    """
+
+    impersonation = graphene.Field(
+        BiometricImpersonationProbeType, description="Null when the impersonation probe did not run.",
+    )
+
+    class Meta:
+        model = BiometricVerification
+        interfaces = (graphene.relay.Node,)
+        connection_class = ExtendedConnection
+        convert_choices_to_enum = False
+        fields = (
+            "id", "subject_model", "subject_id", "modality", "score", "threshold", "verified", "origin", "fallback",
+            "device_id", "actor", "created_at", "risk_profile", "impersonation_skip_reason", "template_skip_reason",
+        )
+        filter_fields = {
+            "subject_model": ["exact"],
+            "subject_id": ["exact"],
+            "modality": ["exact"],
+            "created_at": ["gte", "lte"],
+        }
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return _read_queryset(queryset, info)
+
+    def resolve_impersonation(self, info):
+        return _impersonation_gql(self, info.context.user)
+
+
+class BiometricErasureFilterValuesType(graphene.ObjectType):
+    """Distinct values of the erasure filters, sorted, at most ERASURE_FILTER_VALUES_LIMIT each."""
+    erased_by = graphene.List(graphene.NonNull(graphene.String), required=True)
+    subject_model = graphene.List(graphene.NonNull(graphene.String), required=True)
+
+
+def _distinct_values(field):
+    return list(
+        BiometricErasure.objects.order_by(field).values_list(field, flat=True).distinct()[:ERASURE_FILTER_VALUES_LIMIT]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Root types — registered by the openIMIS schema aggregator
 # ---------------------------------------------------------------------------
@@ -877,6 +935,17 @@ class Query(graphene.ObjectType):
         subject_id=graphene.String(required=True),
         subject_model=graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL']."),
         description="Verification audit trail for one subject, newest first.",
+    )
+
+    biometric_verification_records = OrderedDjangoFilterConnectionField(
+        BiometricVerificationGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        suspected=graphene.Boolean(description="True: rows whose impersonation probe suspected someone."),
+        description="Verification audit trail across subjects, newest first.",
+    )
+
+    biometric_erasure_filter_values = graphene.Field(
+        BiometricErasureFilterValuesType, description="Distinct erasedBy and subjectModel values of the erasures.",
     )
 
     biometric_multimodal_decisions = OrderedDjangoFilterConnectionField(
@@ -955,6 +1024,22 @@ class Query(graphene.ObjectType):
         from .audit_chain import latest_chain_check
 
         return _chain_check_type(latest_chain_check())
+
+    @staticmethod
+    def resolve_biometric_verification_records(root, info, **kwargs):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
+
+        qs = BiometricVerification.objects.order_by("-created_at", "-id")
+        if kwargs.get("suspected") is not None:
+            qs = qs.filter(impersonation_suspected=kwargs["suspected"])
+        return qs
+
+    @staticmethod
+    def resolve_biometric_erasure_filter_values(root, info):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        return BiometricErasureFilterValuesType(
+            erased_by=_distinct_values("erased_by"), subject_model=_distinct_values("subject_model"),
+        )
 
     @staticmethod
     def resolve_biometric_multimodal_decisions(root, info, **kwargs):
