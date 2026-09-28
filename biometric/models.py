@@ -114,6 +114,8 @@ class BiometricVerification(SubjectRef):
     impersonation_subject_id = models.CharField(max_length=64, blank=True, default="")
     impersonation_score = models.FloatField(null=True, blank=True)
     impersonation_evidence = models.JSONField(default=dict, blank=True)
+    # Why an enabled probe did not run on this row (impersonation.SKIP_REASONS); "" otherwise.
+    impersonation_skip_reason = models.CharField(max_length=32, blank=True, default="")
     device_id = models.CharField(max_length=255, blank=True, default="")
     actor = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -357,3 +359,30 @@ class BiometricAlert(models.Model):
 
     def __str__(self):
         return f"BiometricAlert({self.rule_kind}, {self.state}, x{self.occurrences})"
+
+
+class BiometricAuditChainCheck(models.Model):
+    """
+    The outcome of one audit_chain.verify_chain() run requested through
+    audit_chain.record_chain_check(). Not part of the chain: recording a check
+    appends no event, so the head it reports stays the head it verified.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    checked_at = models.DateTimeField(default=timezone.now, db_index=True)
+    checked_by = models.CharField(max_length=64, blank=True, default="")
+    ok = models.BooleanField()
+    # Events verified before the divergence, or every event when intact.
+    checked = models.BigIntegerField()
+    head_sequence = models.BigIntegerField()
+    head_hash = models.CharField(max_length=64)
+    divergence_kind = models.CharField(max_length=16, blank=True, default="")
+    divergence_sequence = models.BigIntegerField(null=True, blank=True)
+    divergence_detail = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "biometric_audit_chain_check"
+        ordering = ("-checked_at", "-id")
+
+    def __str__(self):
+        return f"BiometricAuditChainCheck({'ok' if self.ok else 'broken'}, head {self.head_sequence})"
