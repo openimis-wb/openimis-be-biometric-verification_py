@@ -1107,3 +1107,48 @@ username. `biometricAuditChainStatus` returns the latest row
 empty when intact), `divergenceSequence` (first divergent sequence, null when intact),
 `divergenceDetail`. The `biometric_audit_verify` command stores no row: a scheduled run of the
 command does not update the status.
+
+### 6.13 Preprocessing tag
+
+Two vectors are comparable only when the provider turned both samples into model input the same
+way. Each provider declares that way as `ModalityProvider.preprocessing` (a string, `""` for
+none), and every template records the value it was extracted under.
+
+**DeepFace colour order.** `DeepFace.represent()` takes a numpy array in BGR channel order, the
+OpenCV convention: the `represent()` docstring says so for `img_path`, `commons/image_utils.load_image`
+returns a numpy input unchanged as the BGR image, and `modules/representation.py` reverses the
+detected face from RGB to BGR before the model (checked on deepface 0.0.101). `_to_numpy()` decodes
+the sample with Pillow, without EXIF transpose, converts it to RGB and reverses the channels into a
+contiguous BGR array. `DeepFaceProvider.preprocessing` is `"pillow_bgr"`. Face geometry (§6.7) is
+unaffected: reversing channels moves no pixel.
+
+**Recorded.** `enrol()` writes the provider's tag to `BiometricTemplate.metadata["preprocessing"]`
+when the tag is not empty, for a server extraction and for a device template alike (the device
+template is taken to come from the gallery's provider, as its provider and model name are). The
+key is reserved: a caller's `metadata["preprocessing"]`, or one in the device's
+`Extracted.metadata`, is dropped. A row without the key carries `""`.
+
+**Rule.** A template is compared with a provider's output only when its tag equals the provider's
+current tag (`services.comparable_preprocessing`). Otherwise it is skipped with the reason
+`preprocessing_mismatch`:
+
+| Where | Skip | Reason recorded |
+|---|---|---|
+| `verify()`, server path | the subject's template is not compared | `BiometricVerification.template_skip_reason` (migration 0004), `VerificationResult.template_skip_reason`, the `verify` audit event's `template_skip_reason`, a WARNING from `biometric.services` with the count |
+| `identify()`, numpy and template paths | the row leaves the gallery before ranking, so it never takes a `top_k` place | INFO from `biometric.services` with the count |
+| `identify()`, pgvector path | `COALESCE(bt.metadata->>'preprocessing', '') = <provider tag>` in the query, before `LIMIT` | none (the query returns no count) |
+| impersonation probe (§6.9) | through `identify()` | as `identify()` |
+| `BiometricCandidateSource.scan` | a probe row under another tag is not scanned; its gallery goes through `identify()` | INFO from `biometric.dedup_source` with the count |
+
+`template_skip_reason` is `""` when nothing was skipped, and on the device path, which compares no
+stored template on the server. When every template of the subject is skipped, `score` is null and
+`verified` false, as for a subject with no template.
+
+GraphQL: `templateSkipReason: String` on `BiometricVerifyResultType` (so on `verifyBiometric` and on
+each leg of `verifyBiometricMultimodal`) and on `biometricVerifications` rows.
+
+**Migration of a gallery.** No gallery extracted before the tag exists in any deployment. A template
+under another tag stays stored and inert: re-enrolling the subject supersedes it, since the unique
+active key (subject, modality, position, provider, model name) does not include the tag. A provider
+whose preprocessing changes changes its tag, and every template recorded under the old tag stops
+matching until it is re-enrolled.

@@ -17,6 +17,7 @@ class VerificationResult:
     risk_profile: str = ""       # the named profile the threshold was resolved under, "" for the base
     impersonation: Optional[Any] = None  # impersonation.ImpersonationProbe, None when the probe did not run
     impersonation_skip_reason: str = ""  # impersonation.SKIP_REASONS entry when an enabled probe did not run
+    template_skip_reason: str = ""  # services.PREPROCESSING_MISMATCH when a template was left out, "" otherwise
 
 
 @dataclass
@@ -55,6 +56,10 @@ class ModalityProvider(ABC):
     provider_name: str
     kind: str                # "embedding" | "template"
     default_threshold: float
+    # Names how extract() turns a sample into the model's input. Templates
+    # recorded under another value are never compared with this provider's
+    # output (services.comparable_preprocessing). "" declares none.
+    preprocessing: str = ""
 
     @abstractmethod
     def extract(self, sample: bytes, position: Optional[str] = None) -> Extracted:

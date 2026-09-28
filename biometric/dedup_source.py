@@ -8,6 +8,10 @@ CandidateSource shapes so BiometricCandidateSource and its tests still run;
 apps.py never registers it anywhere in that case (there is no registry).
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     from deduplication.sources import Candidate, CandidateSource, Watermark, order_pair
 except ImportError:
@@ -50,6 +54,8 @@ class BiometricCandidateSource(CandidateSource):
     Scans active templates for one modality, runs identify() for each against
     the rest of the gallery, and yields a Candidate per match at or above
     DEDUP_THRESHOLD[modality]. watermark() advances on (date_updated, id).
+    Templates recorded under another preprocessing than the modality's
+    provider (§6.13) are neither scanned nor matched.
     """
 
     kind = "biometric"
@@ -60,9 +66,11 @@ class BiometricCandidateSource(CandidateSource):
     def scan(self, since: "Optional[Watermark]" = None):
         from .apps import BiometricConfig
         from .models import BiometricTemplate
-        from .services import identify
+        from .registry import ProviderRegistry
+        from .services import comparable_preprocessing, identify, log_preprocessing_skips
 
         threshold = BiometricConfig.dedup_threshold.get(self.modality, 0.0)
+        provider = None
 
         queryset = BiometricTemplate.objects.filter(
             modality=self.modality, validity_to__isnull=True,
@@ -74,7 +82,15 @@ class BiometricCandidateSource(CandidateSource):
                 queryset = queryset.exclude(date_updated=since.updated_at, id__lte=since.last_id)
 
         seen_pairs = set()
+        skipped = 0
         for template in queryset.iterator():
+            if provider is None:
+                provider = ProviderRegistry.get_provider(self.modality)
+            # identify() filters the gallery side; a probe row under another
+            # preprocessing is left out here.
+            if not comparable_preprocessing(template, provider):
+                skipped += 1
+                continue
             probe_vector = template.vector
             probe_template = template.template
             if template.encrypted:
@@ -112,6 +128,7 @@ class BiometricCandidateSource(CandidateSource):
                         "template_b": match.template_id,
                     },
                 )
+        log_preprocessing_skips(logger, skipped, self.modality, "BiometricCandidateSource.scan()")
 
     def watermark(self):
         from .models import BiometricTemplate

@@ -9,6 +9,36 @@ from .risk_profiles import RiskProfileError, UnknownRiskProfileError  # noqa: F4
 
 logger = logging.getLogger(__name__)
 
+# BiometricTemplate.metadata key holding the provider's preprocessing tag (§6.13);
+# written by enrol() only, never taken from the caller.
+PREPROCESSING_KEY = "preprocessing"
+# Why a template was left out of a comparison: its tag differs from the provider's.
+PREPROCESSING_MISMATCH = "preprocessing_mismatch"
+
+
+def provider_preprocessing(provider) -> str:
+    """The provider's preprocessing tag; "" when it declares none."""
+    value = getattr(provider, "preprocessing", "")
+    return value if isinstance(value, str) else ""
+
+
+def template_preprocessing(row) -> str:
+    """The tag stored on a BiometricTemplate; "" when the row carries none."""
+    metadata = row.metadata if isinstance(row.metadata, dict) else {}
+    value = metadata.get(PREPROCESSING_KEY, "")
+    return value if isinstance(value, str) else ""
+
+
+def comparable_preprocessing(row, provider) -> bool:
+    """True when the row was extracted under the provider's current preprocessing."""
+    return template_preprocessing(row) == provider_preprocessing(provider)
+
+
+def log_preprocessing_skips(log, skipped, modality, where, level=logging.INFO):
+    """Logs how many templates a comparison left out for PREPROCESSING_MISMATCH; silent for none."""
+    if skipped:
+        log.log(level, "%s: %d %s template(s) skipped: %s", where, skipped, modality, PREPROCESSING_MISMATCH)
+
 
 class ConsentRequiredError(PermissionError):
     """Raised by enrol() when REQUIRE_CONSENT is set and no consent was granted."""
@@ -58,6 +88,9 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     QualityRefusedError is raised; a caller transaction that rolls back on
     that error discards it.
 
+    metadata["preprocessing"] holds the provider's preprocessing tag (§6.13),
+    also for a device template; a caller's value for that key is dropped.
+
     subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
     """
     from django.utils import timezone
@@ -93,6 +126,10 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     provider = ProviderRegistry.get_provider(modality)
     extracted = device_template if device_template is not None else provider.extract(sample, position=position)
     model_name = getattr(provider, "model_name", "")
+    stored_metadata = {**extracted.metadata, **metadata}
+    stored_metadata.pop(PREPROCESSING_KEY, None)
+    if provider_preprocessing(provider):
+        stored_metadata[PREPROCESSING_KEY] = provider_preprocessing(provider)
 
     verdict = assess(
         modality, sample, extracted, server_extracted=device_template is None, mode_value=quality_mode(),
@@ -149,7 +186,7 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
             vector=vector, template=template_bytes, template_iso=template_iso_bytes,
             encrypted=encrypted, quality=extracted.quality,
             provider=provider.provider_name, model_name=model_name,
-            metadata={**extracted.metadata, **metadata},
+            metadata=stored_metadata,
             quality_verdict=verdict.as_dict(),
         )
         record_event(
@@ -198,6 +235,10 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     malformed or looser profile RiskProfileError, before extraction and before
     any row is written.
 
+    The server path compares only templates recorded under the provider's
+    preprocessing (§6.13); a template left out sets template_skip_reason to
+    PREPROCESSING_MISMATCH on the row and the result.
+
     With BIOMETRIC["AUDIT"] enabled (§6.10), the row and a verify audit event
     (plus an impersonation.suspected event on a suspicion) share one
     transaction, opened after the probe.
@@ -232,6 +273,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
 
     probe = None
     skip_reason = ""
+    template_skip_reason = ""
     if device_score is not None:
         origin = "device"
         score = device_score
@@ -255,7 +297,11 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
 
         key = BiometricConfig.template_key
         best = None
+        skipped = 0
         for row in qs:
+            if not comparable_preprocessing(row, provider):
+                skipped += 1
+                continue
             row_key = key if row.encrypted else None
             try:
                 if row.kind == "embedding":
@@ -272,6 +318,8 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
 
         score = best
         verified = score is not None and score >= threshold
+        log_preprocessing_skips(logger, skipped, modality, "verify()", level=logging.WARNING)
+        template_skip_reason = PREPROCESSING_MISMATCH if skipped else ""
 
         from .impersonation import maybe_probe
 
@@ -295,7 +343,8 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
             subject_model=subject_model, subject_id=subject_id, modality=modality,
             score=score, threshold=threshold, verified=verified, origin=origin,
             fallback=fallback, context=context, device_id=device_id or "", actor=actor,
-            risk_profile=risk_profile or "", impersonation_skip_reason=skip_reason, **impersonation_fields,
+            risk_profile=risk_profile or "", impersonation_skip_reason=skip_reason,
+            template_skip_reason=template_skip_reason, **impersonation_fields,
         )
         record_event(
             ACTION_VERIFY, actor=actor, subject_model=subject_model, subject_id=subject_id, modality=modality,
@@ -312,6 +361,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
                 "impersonation_status": probe.status if probe is not None else "",
                 "impersonation_suspected": bool(probe is not None and probe.suspected),
                 "impersonation_skip_reason": skip_reason,
+                "template_skip_reason": template_skip_reason,
             },
         )
         if probe is not None and probe.suspected:
@@ -363,6 +413,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         risk_profile=risk_profile or "",
         impersonation=probe,
         impersonation_skip_reason=skip_reason,
+        template_skip_reason=template_skip_reason,
     )
 
 
@@ -482,6 +533,19 @@ def _identify_gallery_queryset(provider, modality, scope, exclude_subject, kind)
     return qs
 
 
+def _comparable_gallery(provider, modality, scope, exclude_subject, kind):
+    """The gallery rows recorded under the provider's preprocessing; the others are counted and logged."""
+    rows = []
+    skipped = 0
+    for row in _identify_gallery_queryset(provider, modality, scope, exclude_subject, kind):
+        if comparable_preprocessing(row, provider):
+            rows.append(row)
+        else:
+            skipped += 1
+    log_preprocessing_skips(logger, skipped, modality, "identify()")
+    return rows
+
+
 def _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subject):
     """Portable path: gallery @ probe after L2 normalisation. Always available."""
     import numpy as np
@@ -489,7 +553,7 @@ def _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subj
     from . import crypto
     from .apps import BiometricConfig
 
-    rows = list(_identify_gallery_queryset(provider, modality, scope, exclude_subject, "embedding"))
+    rows = _comparable_gallery(provider, modality, scope, exclude_subject, "embedding")
     if not rows:
         return []
 
@@ -548,11 +612,13 @@ def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_s
     dim = len(probe_vector)
     probe_literal = "[" + ",".join(repr(float(x)) for x in probe_vector) + "]"
 
+    # The preprocessing filter sits before LIMIT, so a skipped row never takes a top_k place.
     where = [
         "bvi.modality = %s", "bvi.provider = %s", "bvi.model_name = %s",
         "bt.validity_to IS NULL",
+        f"COALESCE(bt.metadata->>'{PREPROCESSING_KEY}', '') = %s",
     ]
-    params = [modality, provider.provider_name, model_name]
+    params = [modality, provider.provider_name, model_name, provider_preprocessing(provider)]
 
     if exclude_subject is not None:
         where.append("bt.subject_id != %s")
@@ -591,7 +657,7 @@ def _identify_template(provider, modality, probe_template, top_k, scope, exclude
     from . import crypto
     from .apps import BiometricConfig
 
-    rows = list(_identify_gallery_queryset(provider, modality, scope, exclude_subject, "template"))
+    rows = _comparable_gallery(provider, modality, scope, exclude_subject, "template")
     key = BiometricConfig.template_key
 
     scored = []
@@ -610,7 +676,8 @@ def identify(modality, *, sample=None, vector=None, template=None, top_k=5,
              scope=None, exclude_subject=None, actor=None):
     """
     Rank the gallery (active templates for the modality's configured provider
-    and model, filtered by scope on metadata keys) against one probe.
+    and model, filtered by scope on metadata keys) against one probe. Only
+    templates recorded under the provider's preprocessing are ranked (§6.13).
 
     With actor given, the ranking is recorded as an identify audit event
     (§6.10); internal callers (the impersonation probe, the deduplication

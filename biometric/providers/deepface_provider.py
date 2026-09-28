@@ -40,6 +40,9 @@ _DEFAULT_DETECTOR = "retinaface"
 # distance cutoff). Configurable per deployment via MODALITIES["face"]["threshold"].
 _DEFAULT_THRESHOLD = 0.32
 
+# Tag of _to_numpy(): Pillow decode to RGB, channels reversed to BGR.
+_PREPROCESSING = "pillow_bgr"
+
 # facial_area keys holding (x, y) points. The eye points are present on every
 # supported DeepFace version (None when not found); nose and mouth corners only
 # on versions that pass them through, for detectors that report them.
@@ -57,6 +60,7 @@ class DeepFaceProvider(EmbeddingProvider):
     provider_name = "deepface"
     modality = "face"
     default_threshold = _DEFAULT_THRESHOLD
+    preprocessing = _PREPROCESSING
 
     def __init__(
         self,
@@ -192,12 +196,17 @@ def face_geometry_from_deepface(result, *, detector_backend) -> Optional[FaceGeo
 
 
 def _to_numpy(image_bytes: bytes):
-    """Convert raw image bytes to a numpy array suitable for DeepFace."""
+    """
+    The sample as the height x width x 3 uint8 array DeepFace.represent()
+    takes: BGR channel order, the OpenCV convention DeepFace documents for
+    numpy input. Pillow decodes without EXIF transpose, as the quality gate
+    does; this is the preprocessing tagged _PREPROCESSING.
+    """
     try:
         import numpy as np
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        return np.array(img)
+        return np.ascontiguousarray(np.array(img)[:, :, ::-1])
     except ImportError:
         return image_bytes

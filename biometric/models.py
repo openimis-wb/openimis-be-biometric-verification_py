@@ -116,6 +116,9 @@ class BiometricVerification(SubjectRef):
     impersonation_evidence = models.JSONField(default=dict, blank=True)
     # Why an enabled probe did not run on this row (impersonation.SKIP_REASONS); "" otherwise.
     impersonation_skip_reason = models.CharField(max_length=32, blank=True, default="")
+    # services.PREPROCESSING_MISMATCH when a subject template was left out of the
+    # comparison because its preprocessing differs from the provider's; "" otherwise.
+    template_skip_reason = models.CharField(max_length=32, blank=True, default="")
     device_id = models.CharField(max_length=255, blank=True, default="")
     actor = models.CharField(max_length=64)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

@@ -191,6 +191,11 @@ _SKIP_REASON_DESCRIPTION = (
     "or device_path_disabled; empty otherwise."
 )
 
+_TEMPLATE_SKIP_REASON_DESCRIPTION = (
+    "preprocessing_mismatch when a subject template was left out of the comparison because it was "
+    "extracted under another preprocessing; empty otherwise."
+)
+
 
 class BiometricVerificationRecordType(graphene.ObjectType):
     """One BiometricVerification audit row."""
@@ -211,6 +216,7 @@ class BiometricVerificationRecordType(graphene.ObjectType):
         BiometricImpersonationProbeType, description="Null when the impersonation probe did not run.",
     )
     impersonation_skip_reason = graphene.String(description=_SKIP_REASON_DESCRIPTION)
+    template_skip_reason = graphene.String(description=_TEMPLATE_SKIP_REASON_DESCRIPTION)
 
 
 class BiometricMatchType(graphene.ObjectType):
@@ -235,6 +241,7 @@ class BiometricVerifyResultType(graphene.ObjectType):
         BiometricImpersonationProbeType, description="Null when the impersonation probe did not run.",
     )
     impersonation_skip_reason = graphene.String(description=_SKIP_REASON_DESCRIPTION)
+    template_skip_reason = graphene.String(description=_TEMPLATE_SKIP_REASON_DESCRIPTION)
 
 
 def _verify_result_gql(result, user):
@@ -245,11 +252,17 @@ def _verify_result_gql(result, user):
         risk_profile=result.risk_profile if isinstance(result.risk_profile, str) else "",
         impersonation=_impersonation_gql(getattr(result, "impersonation", None), user),
         impersonation_skip_reason=_skip_reason(result),
+        template_skip_reason=_template_skip_reason(result),
     )
 
 
 def _skip_reason(source):
     reason = getattr(source, "impersonation_skip_reason", "")
+    return reason if isinstance(reason, str) else ""
+
+
+def _template_skip_reason(source):
+    reason = getattr(source, "template_skip_reason", "")
     return reason if isinstance(reason, str) else ""
 
 
@@ -967,6 +980,7 @@ class Query(graphene.ObjectType):
                 origin=row.origin, fallback=row.fallback, device_id=row.device_id,
                 actor=row.actor, created_at=row.created_at, risk_profile=row.risk_profile,
                 impersonation=_impersonation_gql(row, user), impersonation_skip_reason=_skip_reason(row),
+                template_skip_reason=_template_skip_reason(row),
             )
             for row in rows
         ]
