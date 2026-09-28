@@ -215,6 +215,33 @@ class BiometricVerifyResultType(graphene.ObjectType):
     )
 
 
+def _verify_result_gql(result, user):
+    """BiometricVerifyResultType from a services.verify() result."""
+    return BiometricVerifyResultType(
+        verified=result.verified, confidence=result.confidence, provider=result.provider,
+        modality=result.modality, origin=result.origin, threshold=result.threshold, error=result.error,
+        risk_profile=result.risk_profile if isinstance(result.risk_profile, str) else "",
+        impersonation=_impersonation_gql(getattr(result, "impersonation", None), user),
+    )
+
+
+class BiometricMultimodalVerifyResultType(graphene.ObjectType):
+    """verifyBiometricMultimodal result: the fused decision and each leg's verification."""
+    outcome = graphene.String(required=True, description="accept | review | reject")
+    score = graphene.Float(description="Fused score; null when no weighted leg has a score.")
+    reasons = graphene.List(graphene.NonNull(graphene.String), required=True)
+    risk_profile = graphene.String(description="The named risk profile applied; empty for the base rules.")
+    legs = graphene.List(graphene.NonNull(BiometricVerifyResultType), required=True)
+
+
+class BiometricVerifyLegInput(graphene.InputObjectType):
+    """One modality of a multimodal verification: a sample (server path) or a device score."""
+    modality = graphene.String(required=True)
+    sample = graphene.String(required=False, description="Base64-encoded sample (server path).")
+    position = graphene.String(required=False)
+    device_score = graphene.Float(required=False)
+
+
 class EnrolBiometricMutation(graphene.Mutation):
     """
     Extract (or accept a device template for) one sample and store it as the subject's active template.
@@ -296,11 +323,59 @@ class VerifyBiometricMutation(graphene.Mutation):
             device_score=device_score, fallback=bool(fallback), context=context,
             device_id=device_id or "", actor=user.username, risk_profile=risk_profile or None,
         )
-        return BiometricVerifyResultType(
-            verified=result.verified, confidence=result.confidence, provider=result.provider,
-            modality=result.modality, origin=result.origin, threshold=result.threshold, error=result.error,
-            risk_profile=result.risk_profile if isinstance(result.risk_profile, str) else "",
-            impersonation=_impersonation_gql(getattr(result, "impersonation", None), user),
+        return _verify_result_gql(result, user)
+
+
+class VerifyBiometricMultimodalMutation(graphene.Mutation):
+    """
+    Verifies each leg (one per modality) and fuses the leg scores under
+    BIOMETRIC["FUSION"] and the optional risk profile (docs/wb-biometric-dedup-seam.md §6.11).
+
+    The fusion rules come from configuration and the profile only: no argument
+    sets weights, thresholds, floors, floor_decision or required. An unknown
+    or invalid riskProfile, or an invalid leg list, is a GraphQL error and no
+    verification is recorded.
+    """
+
+    class Arguments:
+        subject_id = graphene.String(required=True)
+        subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
+        legs = graphene.List(graphene.NonNull(BiometricVerifyLegInput), required=True)
+        risk_profile = graphene.String(
+            required=False, description="Named risk profile from BIOMETRIC['RISK_PROFILES']; it may only tighten.",
+        )
+        fallback = graphene.Boolean(required=False)
+        device_id = graphene.String(required=False)
+        context = graphene.JSONString(required=False)
+
+    Output = BiometricMultimodalVerifyResultType
+
+    @classmethod
+    def mutate(cls, root, info, subject_id, legs, subject_model=None, risk_profile=None, fallback=False,
+               device_id="", context=None):
+        user = info.context.user
+        _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
+
+        from .services import verify_multimodal
+
+        service_legs = []
+        for leg in legs:
+            service_leg = {"modality": leg.modality}
+            if leg.sample is not None:
+                service_leg["sample"] = _decode_sample(leg.sample)
+            if leg.device_score is not None:
+                service_leg["device_score"] = leg.device_score
+            if leg.position:
+                service_leg["position"] = leg.position
+            service_legs.append(service_leg)
+
+        result = verify_multimodal(
+            subject_model, subject_id, service_legs, fallback=bool(fallback), context=context,
+            device_id=device_id or "", actor=user.username, risk_profile=risk_profile or None,
+        )
+        return BiometricMultimodalVerifyResultType(
+            outcome=result.decision.outcome, score=result.decision.score, reasons=list(result.decision.reasons),
+            risk_profile=result.decision.risk_profile, legs=[_verify_result_gql(leg, user) for leg in result.legs],
         )
 
 
@@ -603,6 +678,7 @@ class Query(graphene.ObjectType):
 class Mutation(graphene.ObjectType):
     enrol_biometric = EnrolBiometricMutation.Field()
     verify_biometric = VerifyBiometricMutation.Field()
+    verify_biometric_multimodal = VerifyBiometricMultimodalMutation.Field()
     record_biometric_consent = RecordBiometricConsentMutation.Field()
     acknowledge_biometric_alert = AcknowledgeBiometricAlertMutation.Field()
     resolve_biometric_alert = ResolveBiometricAlertMutation.Field()

@@ -32,6 +32,13 @@ class Decision:
     risk_profile: str = ""       # the named profile the rules were resolved under, "" for the base
 
 
+@dataclass(frozen=True)
+class MultimodalVerification:
+    """verify_multimodal() result: the fused decision and each leg's verify() result, in leg order."""
+    decision: Decision
+    legs: List[VerificationResult]
+
+
 def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, position=None, actor,
           metadata=None, device_template=None):
     """
@@ -343,6 +350,74 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         risk_profile=risk_profile or "",
         impersonation=probe,
     )
+
+
+_LEG_KEYS = frozenset({"modality", "sample", "position", "device_score"})
+
+
+def _check_legs(legs):
+    """ValueError unless legs is a non-empty list of distinct modalities, each with a sample or a device score."""
+    if not isinstance(legs, (list, tuple)) or not legs:
+        raise ValueError("verify_multimodal() requires a non-empty list of legs.")
+    seen = set()
+    for leg in legs:
+        if not isinstance(leg, dict):
+            raise ValueError("Each leg must be a dict.")
+        unknown = sorted(set(leg) - _LEG_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown leg keys {unknown}; allowed: {sorted(_LEG_KEYS)}.")
+        modality = leg.get("modality")
+        if not isinstance(modality, str) or not modality:
+            raise ValueError("Each leg needs a modality.")
+        if modality in seen:
+            raise ValueError(f"Modality '{modality}' appears in more than one leg.")
+        seen.add(modality)
+        has_sample = leg.get("sample") is not None
+        has_score = leg.get("device_score") is not None
+        if has_sample == has_score:
+            raise ValueError(f"Leg '{modality}' needs exactly one of sample and device_score.")
+
+
+def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=False, context=None,
+                      device_id="", actor, risk_profile=None):
+    """
+    Verify one subject on several modalities and fuse the leg scores.
+
+    legs is a list of {"modality", "sample" | "device_score", "position"?},
+    one per modality. Each leg runs verify() with the same risk_profile,
+    fallback, context, device_id and actor, and records its own
+    BiometricVerification row. fuse() then combines the leg scores under the
+    configured BIOMETRIC["FUSION"] rules and the same profile, so every
+    profile key applies: thresholds, floors, floor_decision, required and
+    modality_thresholds. Callers pass no fusion rule of their own.
+
+    The legs, the modalities' providers and the profile are checked before
+    any leg runs; a leg that fails later (e.g. no face in its sample) leaves
+    the rows of the legs before it.
+    """
+    from .apps import BiometricConfig
+    from .registry import ProviderRegistry
+
+    if subject_id is None:
+        raise TypeError("verify_multimodal() requires subject_id.")
+    _check_legs(legs)
+    for leg in legs:
+        ProviderRegistry.get_provider(leg["modality"])
+    if risk_profile:
+        from .risk_profiles import base_rules, resolve
+
+        resolve(risk_profile, base_rules(fusion=BiometricConfig.fusion, modalities=BiometricConfig.modalities))
+
+    results = [
+        verify(
+            subject_model, subject_id, leg["modality"],
+            sample=leg.get("sample"), position=leg.get("position"), device_score=leg.get("device_score"),
+            fallback=fallback, context=context, device_id=device_id, actor=actor, risk_profile=risk_profile,
+        )
+        for leg in legs
+    ]
+    decision = fuse({result.modality: result.confidence for result in results}, risk_profile=risk_profile)
+    return MultimodalVerification(decision=decision, legs=results)
 
 
 def record_impersonation_suspected(subject_model, subject_id, *, modality, verification_id,
