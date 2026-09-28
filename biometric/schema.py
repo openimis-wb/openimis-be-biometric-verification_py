@@ -9,7 +9,7 @@ from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
 
 from .apps import BiometricConfig
-from .models import BiometricAlert, BiometricAuditEvent, BiometricErasure
+from .models import BiometricAlert, BiometricAuditEvent, BiometricErasure, BiometricMultimodalDecision
 
 
 def _decode_sample(sample):
@@ -229,6 +229,7 @@ class BiometricMatchType(graphene.ObjectType):
 
 class BiometricVerifyResultType(graphene.ObjectType):
     """verifyBiometric mutation result."""
+    verification_id = graphene.String(description="UUID of the BiometricVerification row recorded.")
     verified = graphene.Boolean(required=True)
     confidence = graphene.Float()
     provider = graphene.String()
@@ -246,7 +247,9 @@ class BiometricVerifyResultType(graphene.ObjectType):
 
 def _verify_result_gql(result, user):
     """BiometricVerifyResultType from a services.verify() result."""
+    verification_id = getattr(result, "verification_id", None)
     return BiometricVerifyResultType(
+        verification_id=verification_id if isinstance(verification_id, str) else None,
         verified=result.verified, confidence=result.confidence, provider=result.provider,
         modality=result.modality, origin=result.origin, threshold=result.threshold, error=result.error,
         risk_profile=result.risk_profile if isinstance(result.risk_profile, str) else "",
@@ -268,6 +271,7 @@ def _template_skip_reason(source):
 
 class BiometricMultimodalVerifyResultType(graphene.ObjectType):
     """verifyBiometricMultimodal result: the fused decision and each leg's verification."""
+    decision_id = graphene.String(description="UUID of the stored BiometricMultimodalDecision.")
     outcome = graphene.String(required=True, description="accept | review | reject")
     score = graphene.Float(description="Fused score; null when no weighted leg has a score.")
     reasons = graphene.List(graphene.NonNull(graphene.String), required=True)
@@ -438,8 +442,9 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
             device_id=device_id or "", actor=user.username, risk_profile=risk_profile or None,
         )
         return BiometricMultimodalVerifyResultType(
-            outcome=result.decision.outcome, score=result.decision.score, reasons=list(result.decision.reasons),
-            risk_profile=result.decision.risk_profile, legs=[_verify_result_gql(leg, user) for leg in result.legs],
+            decision_id=result.decision_id, outcome=result.decision.outcome, score=result.decision.score,
+            reasons=list(result.decision.reasons), risk_profile=result.decision.risk_profile,
+            legs=[_verify_result_gql(leg, user) for leg in result.legs],
         )
 
 
@@ -795,6 +800,58 @@ class VerifyBiometricAuditChainMutation(graphene.Mutation):
 
 
 # ---------------------------------------------------------------------------
+# Verification records (docs/wb-biometric-dedup-seam.md §6.11, §6.14)
+# ---------------------------------------------------------------------------
+
+def _read_queryset(queryset, info):
+    """
+    The queryset when the caller holds gql_biometric_read_perms, the right of
+    biometricVerifications. Root node lookups go through get_queryset too.
+    """
+    _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
+    return queryset
+
+
+class BiometricMultimodalDecisionGQLType(DjangoObjectType):
+    """The stored fused decision of one verifyBiometricMultimodal call; leg ids, no other subject."""
+
+    reasons = graphene.List(graphene.String)
+    modalities = graphene.List(graphene.String)
+    verification_ids = graphene.List(graphene.String, description="The legs' verification UUIDs, in leg order.")
+
+    class Meta:
+        model = BiometricMultimodalDecision
+        interfaces = (graphene.relay.Node,)
+        connection_class = ExtendedConnection
+        fields = (
+            "id", "subject_model", "subject_id", "outcome", "score", "reasons", "risk_profile", "modalities",
+            "verification_ids", "fallback", "device_id", "actor", "created_at",
+        )
+        filter_fields = {
+            "subject_model": ["exact"],
+            "subject_id": ["exact"],
+            "outcome": ["exact"],
+            "risk_profile": ["exact"],
+            "created_at": ["gte", "lte"],
+        }
+
+    @classmethod
+    def get_queryset(cls, queryset, info):
+        return _read_queryset(queryset, info)
+
+    def resolve_reasons(self, info):
+        return [str(r) for r in self.reasons] if isinstance(self.reasons, list) else []
+
+    def resolve_modalities(self, info):
+        return [str(m) for m in self.modalities] if isinstance(self.modalities, list) else []
+
+    def resolve_verification_ids(self, info):
+        if not isinstance(self.verification_ids, list):
+            return []
+        return [str(v) for v in self.verification_ids if v is not None]
+
+
+# ---------------------------------------------------------------------------
 # Root types — registered by the openIMIS schema aggregator
 # ---------------------------------------------------------------------------
 
@@ -820,6 +877,12 @@ class Query(graphene.ObjectType):
         subject_id=graphene.String(required=True),
         subject_model=graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL']."),
         description="Verification audit trail for one subject, newest first.",
+    )
+
+    biometric_multimodal_decisions = OrderedDjangoFilterConnectionField(
+        BiometricMultimodalDecisionGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        description="Stored fused decisions of verifyBiometricMultimodal, newest first.",
     )
 
     biometric_audit_events = OrderedDjangoFilterConnectionField(
@@ -892,6 +955,11 @@ class Query(graphene.ObjectType):
         from .audit_chain import latest_chain_check
 
         return _chain_check_type(latest_chain_check())
+
+    @staticmethod
+    def resolve_biometric_multimodal_decisions(root, info, **kwargs):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
+        return BiometricMultimodalDecision.objects.order_by("-created_at", "-id")
 
     @staticmethod
     def resolve_biometric_audit_events(root, info, **kwargs):

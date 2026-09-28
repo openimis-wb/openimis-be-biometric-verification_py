@@ -133,6 +133,37 @@ class BiometricVerification(SubjectRef):
         return f"BiometricVerification({self.subject_model}:{self.subject_id}, {self.modality}, verified={self.verified})"
 
 
+class BiometricMultimodalDecision(SubjectRef):
+    """
+    The fused decision of one services.verify_multimodal() call. Each leg keeps
+    its own BiometricVerification row, listed in leg order in verification_ids.
+    Scores, reasons and ids only, never a sample or a vector.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    outcome = models.CharField(max_length=8, help_text='"accept", "review" or "reject"')
+    score = models.FloatField(null=True, blank=True)
+    reasons = models.JSONField(default=list, blank=True)
+    # The named risk profile the fusion rules were resolved under; empty for the base rules.
+    risk_profile = models.CharField(max_length=64, blank=True, default="")
+    modalities = models.JSONField(default=list, blank=True)
+    verification_ids = models.JSONField(default=list, blank=True)
+    fallback = models.BooleanField(default=False)
+    device_id = models.CharField(max_length=255, blank=True, default="")
+    actor = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "biometric_multimodal_decision"
+        indexes = [
+            models.Index(fields=["subject_model", "subject_id", "created_at"], name="biometric_mm_decision_subj_idx"),
+        ]
+
+    def __str__(self):
+        return f"BiometricMultimodalDecision({self.subject_model}:{self.subject_id}, {self.outcome})"
+
+
 class BiometricConsent(SubjectRef):
     """Consent record gating enrol() when REQUIRE_CONSENT is set."""
 

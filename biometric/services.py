@@ -67,6 +67,7 @@ class MultimodalVerification:
     """verify_multimodal() result: the fused decision and each leg's verify() result, in leg order."""
     decision: Decision
     legs: List[VerificationResult]
+    decision_id: Optional[str] = None   # the BiometricMultimodalDecision row that stores the decision
 
 
 def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, position=None, actor,
@@ -404,6 +405,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
         transaction.on_commit(lambda: signals.emit_impersonation_suspected(**signal_payload))
 
     return VerificationResult(
+        verification_id=str(row.id),
         verified=verified,
         confidence=score,
         provider=getattr(provider, "provider_name", None),
@@ -461,9 +463,17 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
 
     The legs, the modalities' providers and the profile are checked before
     any leg runs; a leg that fails later (e.g. no face in its sample) leaves
-    the rows of the legs before it.
+    the rows of the legs before it and stores no decision.
+
+    The fused decision is stored as a BiometricMultimodalDecision row listing
+    the leg verification ids, and recorded as a verify.multimodal audit event
+    in the same block when BIOMETRIC["AUDIT"] is enabled (§6.10). The event
+    names the claimed subject only; a leg's impersonation match stays on that
+    leg's row and events.
     """
     from .apps import BiometricConfig
+    from .audit_chain import ACTION_VERIFY_MULTIMODAL, audited_block, record_event
+    from .models import BiometricMultimodalDecision
     from .registry import ProviderRegistry
 
     if subject_id is None:
@@ -486,7 +496,32 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
         for leg in legs
     ]
     decision = fuse({result.modality: result.confidence for result in results}, risk_profile=risk_profile)
-    return MultimodalVerification(decision=decision, legs=results)
+
+    subject_model = subject_model or BiometricConfig.subject_model
+    subject_id = str(subject_id)
+    modalities = [result.modality for result in results]
+    verification_ids = [result.verification_id for result in results]
+    with audited_block():
+        row = BiometricMultimodalDecision.objects.create(
+            subject_model=subject_model, subject_id=subject_id, outcome=decision.outcome, score=decision.score,
+            reasons=list(decision.reasons), risk_profile=decision.risk_profile, modalities=modalities,
+            verification_ids=verification_ids, fallback=bool(fallback), device_id=device_id or "", actor=actor,
+        )
+        record_event(
+            ACTION_VERIFY_MULTIMODAL, actor=actor, subject_model=subject_model, subject_id=subject_id,
+            payload={
+                "decision_id": str(row.id),
+                "outcome": decision.outcome,
+                "score": decision.score,
+                "reasons": list(decision.reasons),
+                "risk_profile": decision.risk_profile,
+                "modalities": modalities,
+                "verification_ids": verification_ids,
+                "fallback": bool(fallback),
+                "device_id": device_id or "",
+            },
+        )
+    return MultimodalVerification(decision=decision, legs=results, decision_id=str(row.id))
 
 
 def record_impersonation_suspected(subject_model, subject_id, *, modality, verification_id,

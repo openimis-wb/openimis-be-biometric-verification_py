@@ -18,6 +18,7 @@ class VerificationResult:
     impersonation: Optional[Any] = None  # impersonation.ImpersonationProbe, None when the probe did not run
     impersonation_skip_reason: str = ""  # impersonation.SKIP_REASONS entry when an enabled probe did not run
     template_skip_reason: str = ""  # services.PREPROCESSING_MISMATCH when a template was left out, "" otherwise
+    verification_id: Optional[str] = None  # the BiometricVerification row verify() recorded
 
 
 @dataclass

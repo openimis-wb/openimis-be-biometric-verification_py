@@ -852,7 +852,8 @@ on `BiometricVerification`.
 |---|---|---|---|
 | `template.enrol` | `enrol()` | enrolled subject | `template_id`, `position`, `provider`, `model_name`, `kind`, `quality`, `encrypted`, `device_template`, `superseded`, `quality_status`, `quality_reasons` |
 | `template.enrol_refused` | `enrol()`, enforce mode, `REFUSED` verdict | subject of the refused sample | `position`, `provider`, `model_name`, `kind`, `quality`, `device_template`, `quality_status`, `quality_mode`, `quality_reasons`, `quality_measures` |
-| `verify` | `verify()` | claimed subject | `verification_id`, `verified`, `score`, `threshold`, `origin`, `fallback`, `device_id`, `position`, `risk_profile`, `impersonation_status`, `impersonation_suspected`, `impersonation_skip_reason` |
+| `verify` | `verify()` | claimed subject | `verification_id`, `verified`, `score`, `threshold`, `origin`, `fallback`, `device_id`, `position`, `risk_profile`, `impersonation_status`, `impersonation_suspected`, `impersonation_skip_reason`, `template_skip_reason` |
+| `verify.multimodal` | `verify_multimodal()`, after the legs | claimed subject | `decision_id`, `outcome`, `score`, `reasons`, `risk_profile`, `modalities`, `verification_ids`, `fallback`, `device_id` |
 | `impersonation.suspected` | `verify()` through `record_impersonation_suspected()` | claimed subject | `verification_id`, `matched_subject_model`, `matched_subject_id`, `matched_template_id`, `matched_score`, `claimed_score`, `threshold`, `margin` |
 | `identify` | `identify(actor=...)` only | none | `top_k`, `scope`, `exclude_subject`, `probe` (`sample` / `vector` / `template`), `matches` [{`subject_model`, `subject_id`, `template_id`, `score`}] |
 | `template.consolidate` | `consolidate()`, only when templates moved | kept subject | `retired_id`, `counts`, `template_ids` |
@@ -1049,7 +1050,19 @@ verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=Fa
 - A leg that fails later (for example no face in its sample) raises and keeps the rows of the legs
   before it. The legs do not share a transaction: with audit on, the chain lock of one leg is never
   held during the next leg's impersonation probe.
-- The fused decision itself is not stored; each leg's row carries the profile name.
+- The fused decision is stored after the last leg as a `BiometricMultimodalDecision` row
+  (`biometric_multimodal_decision`, migration 0005): `subject_model`, `subject_id`, `outcome`,
+  `score` (null when no weighted leg scored), `reasons`, `risk_profile`, `modalities` and
+  `verification_ids` (the legs' `BiometricVerification` ids, in leg order), `fallback`, `device_id`,
+  `actor`, `created_at`. It is written whether audit is on or off. A leg list or profile refused up
+  front, or a leg that raises, stores no decision. `verify()` returns its row id as
+  `VerificationResult.verification_id`; `MultimodalVerification.decision_id` is the decision's id.
+- With audit on (§6.10), the row and a `verify.multimodal` event share one `audited_block()`, after
+  the legs' own `verify` events. The event's subject is the claimed subject and its modality is
+  empty. Payload: `decision_id`, `outcome`, `score`, `reasons`, `risk_profile`, `modalities`,
+  `verification_ids`, `fallback`, `device_id`; no sample, vector or template. It names no other
+  subject: a leg's impersonation match stays on that leg's row and its `impersonation.suspected`
+  event, stripped as §6.10 describes, so there is nothing to strip from the decision.
 
 GraphQL mutation `verifyBiometricMultimodal`, right `gql_biometric_verify_perms` (174002):
 
@@ -1057,9 +1070,22 @@ GraphQL mutation `verifyBiometricMultimodal`, right `gql_biometric_verify_perms`
   `riskProfile: String`, `fallback: Boolean`, `deviceId: String`, `context: JSONString`.
 - `BiometricVerifyLegInput`: `modality: String!`, `sample: String` (base64), `position: String`,
   `deviceScore: Float`, `deviceVector: [Float!]`, `deviceTemplate: String` (base64).
-- Result `BiometricMultimodalVerifyResultType`: `outcome` (accept | review | reject), `score`,
-  `reasons`, `riskProfile`, `legs: [BiometricVerifyResultType!]!`.
+- Result `BiometricMultimodalVerifyResultType`: `decisionId` (UUID of the stored decision), `outcome`
+  (accept | review | reject), `score`, `reasons`, `riskProfile`, `legs: [BiometricVerifyResultType!]!`.
+  `BiometricVerifyResultType.verificationId` is the UUID of the leg's (or `verifyBiometric`'s)
+  `BiometricVerification` row.
 - An invalid leg list or profile is a GraphQL error and no verification is recorded.
+
+Query `biometricMultimodalDecisions`, right `gql_biometric_read_perms` (174004, the right of
+`biometricVerifications`), relay connection (`ExtendedConnection`, page size capped by
+`RELAY_CONNECTION_MAX_LIMIT`), newest `createdAt` first:
+
+- Node `BiometricMultimodalDecisionGQLType`: `id`, `subjectModel`, `subjectId`, `outcome`, `score`,
+  `reasons`, `riskProfile`, `modalities`, `verificationIds`, `fallback`, `deviceId`, `actor`,
+  `createdAt`.
+- Arguments: `subjectModel`, `subjectId`, `outcome`, `riskProfile`, `createdAt_Gte`, `createdAt_Lte`,
+  `orderBy`, `first`, `after`, `before`, `last`, `offset`.
+- The root `node` lookup of this type needs 174004 as well.
 
 ### 6.12 Admin queries
 

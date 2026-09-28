@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 ACTION_ENROL = "template.enrol"
 ACTION_ENROL_REFUSED = "template.enrol_refused"
 ACTION_VERIFY = "verify"
+ACTION_VERIFY_MULTIMODAL = "verify.multimodal"
 ACTION_IDENTIFY = "identify"
 ACTION_IMPERSONATION = "impersonation.suspected"
 ACTION_CONSOLIDATE = "template.consolidate"
@@ -65,6 +66,7 @@ ACTIONS = frozenset({
     ACTION_ENROL,
     ACTION_ENROL_REFUSED,
     ACTION_VERIFY,
+    ACTION_VERIFY_MULTIMODAL,
     ACTION_IDENTIFY,
     ACTION_IMPERSONATION,
     ACTION_CONSOLIDATE,

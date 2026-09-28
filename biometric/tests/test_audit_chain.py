@@ -214,7 +214,8 @@ class TestDisabledIsInert(AuditConfigMixin, SimpleTestCase):
         self.assertEqual(
             ACTIONS,
             frozenset({
-                "template.enrol", "template.enrol_refused", "verify", "identify", "impersonation.suspected",
+                "template.enrol", "template.enrol_refused", "verify", "verify.multimodal", "identify",
+                "impersonation.suspected",
                 "template.consolidate", "template.purge", "template.read", "template.list", "alert.acknowledge",
                 "alert.resolve",
             }),
