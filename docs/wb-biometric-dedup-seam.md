@@ -213,7 +213,8 @@ configuration, all optional with defaults:
 enrol(subject_model, subject_id, modality, sample: bytes, *, position=None, actor, metadata=None,
       device_template: Extracted | None = None) -> BiometricTemplate
 ```
-Refuses when `REQUIRE_CONSENT` and no granted consent for the modality. With a `MatcherProvider`
+Refuses when `REQUIRE_CONSENT` and the latest `BiometricConsent` row for the subject and modality
+(by `recorded_at`) is missing or has `granted=false`: a later refusal revokes an earlier grant. With a `MatcherProvider`
 of kind `device_reported`, `device_template` is stored as given (the device extracted it).
 Supersedes an active row with the same unique key (`validity_to = now`) rather than updating it.
 

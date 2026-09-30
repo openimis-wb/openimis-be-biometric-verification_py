@@ -41,7 +41,7 @@ def log_preprocessing_skips(log, skipped, modality, where, level=logging.INFO):
 
 
 class ConsentRequiredError(PermissionError):
-    """Raised by enrol() when REQUIRE_CONSENT is set and no consent was granted."""
+    """Raised by enrol() when REQUIRE_CONSENT is set and the latest consent for the modality is not a grant."""
 
 
 @dataclass(frozen=True)
@@ -113,13 +113,13 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     metadata = dict(metadata or {})
 
     if BiometricConfig.require_consent:
-        granted = BiometricConsent.objects.filter(
+        # The latest decision for (subject, modality) wins: a later refusal revokes.
+        latest = BiometricConsent.objects.filter(
             subject_model=subject_model,
             subject_id=subject_id,
             modality=modality,
-            granted=True,
-        ).exists()
-        if not granted:
+        ).order_by("-recorded_at").values_list("granted", flat=True).first()
+        if not latest:
             raise ConsentRequiredError(
                 f"No granted consent for modality '{modality}' on {subject_model}:{subject_id}."
             )
