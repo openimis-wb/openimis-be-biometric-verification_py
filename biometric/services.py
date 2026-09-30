@@ -40,6 +40,18 @@ def log_preprocessing_skips(log, skipped, modality, where, level=logging.INFO):
         log.log(level, "%s: %d %s template(s) skipped: %s", where, skipped, modality, PREPROCESSING_MISMATCH)
 
 
+class DevicePathRefusedError(ValueError):
+    """A device score was given for a modality whose provider matches on the server."""
+
+    def __init__(self, modality):
+        # graphql-core copies .extensions onto the GraphQL error it reports.
+        self.extensions = {"code": "BIOMETRIC_DEVICE_PATH_REFUSED"}
+        super().__init__(
+            f"Modality '{modality}' is matched on the server; a device score is accepted only for a "
+            "device_reported provider."
+        )
+
+
 class ConsentRequiredError(PermissionError):
     """Raised by enrol() when REQUIRE_CONSENT is set and the latest consent for the modality is not a grant."""
 
@@ -217,7 +229,9 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     subject for this modality (and position, if given), keep the best score.
     Device path (device_score given): nothing is extracted, the reported score
     is checked against the modality threshold directly. Both record a
-    BiometricVerification row.
+    BiometricVerification row. The device path is open only to a modality
+    whose provider is a DeviceReportedMatcher; any other raises
+    DevicePathRefusedError before anything is written.
 
     risk_profile names a BIOMETRIC["RISK_PROFILES"] entry (§6.8); it can only
     raise the modality threshold. The row records the profile name and the
@@ -264,6 +278,8 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     modality_cfg = BiometricConfig.modalities.get(modality, {})
 
     provider = ProviderRegistry.get_provider(modality)
+    if device_score is not None:
+        _check_device_path(modality, provider)
     threshold = modality_cfg.get("threshold")
     if threshold is None:
         threshold = provider.default_threshold
@@ -422,6 +438,14 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     )
 
 
+def _check_device_path(modality, provider):
+    """DevicePathRefusedError unless the modality's provider matches on the device."""
+    from .providers.device_reported import DeviceReportedMatcher
+
+    if not isinstance(provider, DeviceReportedMatcher):
+        raise DevicePathRefusedError(modality)
+
+
 _LEG_KEYS = frozenset({"modality", "sample", "position", "device_score", "device_template"})
 
 
@@ -464,8 +488,8 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
     profile key applies: thresholds, floors, floor_decision, required and
     modality_thresholds. Callers pass no fusion rule of their own.
 
-    The legs, the modalities' providers and the profile are checked before
-    any leg runs; a leg that fails later (e.g. no face in its sample) leaves
+    The legs, the modalities' providers (a device-score leg needs a
+    device_reported provider) and the profile are checked before any leg runs; a leg that fails later (e.g. no face in its sample) leaves
     the rows of the legs before it and stores no decision.
 
     The fused decision is stored as a BiometricMultimodalDecision row listing
@@ -483,7 +507,9 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
         raise TypeError("verify_multimodal() requires subject_id.")
     _check_legs(legs)
     for leg in legs:
-        ProviderRegistry.get_provider(leg["modality"])
+        provider = ProviderRegistry.get_provider(leg["modality"])
+        if leg.get("device_score") is not None:
+            _check_device_path(leg["modality"], provider)
     if risk_profile:
         from .risk_profiles import base_rules, resolve
 

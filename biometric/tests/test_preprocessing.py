@@ -210,9 +210,14 @@ class TestVerifySkipsOtherPreprocessing(_PreprocessingTestCase):
         self.assertEqual(result.template_skip_reason, PREPROCESSING_MISMATCH)
 
     def test_device_path_records_no_template_skip(self):
-        self._face("s1", b"photo", "p0")
+        BiometricConfig.modalities = {**BiometricConfig.modalities,
+                                      "voice_device": {"provider": "device_reported", "threshold": 48}}
+        BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id="s1", modality="voice_device", kind="template",
+            template=b"voice", provider="device_reported", model_name="", metadata={PREPROCESSING_KEY: "p0"},
+        )
 
-        result = verify(SUBJECT_MODEL, "s1", "face", device_score=0.9, actor="agent")
+        result = verify(SUBJECT_MODEL, "s1", "voice_device", device_score=60.0, actor="agent")
 
         self.assertTrue(result.verified)
         self.assertEqual(result.template_skip_reason, "")

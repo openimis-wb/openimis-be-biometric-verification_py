@@ -42,9 +42,10 @@ class _MultimodalTestCase(_MultimodalServiceTestCase):
 
     def setUp(self):
         super().setUp()
+        # Device-score legs need a device_reported provider (verify(), §3.4).
         BiometricConfig.modalities = {
-            "face": {"provider": "fake_embedding", "threshold": 0.5},
-            "fingerprint": {"provider": "fake_matcher", "threshold": 50.0},
+            "face": {"provider": "device_reported", "threshold": 0.5},
+            "fingerprint": {"provider": "device_reported", "threshold": 50.0},
         }
         BiometricConfig.fusion = dict(FUSION)
         BiometricConfig.risk_profiles = {}
@@ -108,8 +109,12 @@ class TestLegsAndRecords(_MultimodalTestCase):
         self.assertAlmostEqual(result.decision.score, 1.0)
 
     def test_server_path_leg(self):
+        from biometric.registry import ProviderRegistry
         from biometric.services import enrol
 
+        BiometricConfig.modalities = {**BiometricConfig.modalities,
+                                      "face": {"provider": "fake_embedding", "threshold": 0.5}}
+        ProviderRegistry._modality_instances.clear()
         enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent")
         result = verify_multimodal(
             SUBJECT_MODEL, "s1",
@@ -162,7 +167,7 @@ class TestNeverLooserThroughMultimodalVerify(_MultimodalServiceTestCase):
     FINGERPRINT_SCORES = [None, 0.0, 20.0, 40.0, 60.0, 90.0]
 
     def test_no_profile_ever_loosens_the_decision(self):
-        BiometricConfig.modalities = dict(BASE_MODALITIES)
+        BiometricConfig.modalities = {m: {**cfg, "provider": "device_reported"} for m, cfg in BASE_MODALITIES.items()}
         BiometricConfig.fusion = dict(BASE_FUSION)
         BiometricConfig.risk_profiles = dict(ACCEPTED_PROFILES)
 

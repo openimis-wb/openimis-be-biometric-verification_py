@@ -229,6 +229,10 @@ verify(subject_model, subject_id, modality, *, sample: bytes | None = None, posi
 Server path: extract, compare with every active template of the subject for that modality
 (and position when given), keep the best similarity. Device path: `device_score` is checked
 against the modality threshold; nothing is extracted. Both record a `BiometricVerification`.
+The device path is open only to a modality whose provider is `DeviceReportedMatcher`
+(`device_reported`); for a server-matched modality a `device_score` raises
+`DevicePathRefusedError` (GraphQL `extensions.code = "BIOMETRIC_DEVICE_PATH_REFUSED"`) before
+anything is extracted or written, so a caller cannot declare its own score for it.
 
 ```python
 identify(modality, *, sample: bytes | None = None, vector=None, template=None, top_k=5,
@@ -728,8 +732,8 @@ the modality thresholds listed above; no other threshold in the module reads it.
 ### 6.9 Impersonation probe
 
 `biometric/impersonation.py` runs an optional 1:N search inside `verify()`: the probe already
-extracted for the 1:1 comparison (server path), or the vector / template the device supplies
-(device path, opt-in), is ranked against the whole gallery of its modality. A foreign subject at or above the probe threshold is reported as a possible
+extracted for the 1:1 comparison (server path) is ranked against the whole gallery of its
+modality. A foreign subject at or above the probe threshold is reported as a possible
 impersonation. The probe never changes `score`, `threshold` or `verified`.
 
 ```python
@@ -739,7 +743,7 @@ impersonation. The probe never changes `score`, `threshold` or `verified`.
     "top_k": 5,                # foreign subjects kept
     "thresholds": {},          # {modality: similarity}; see the fallback chain below
     "margin": None,            # None, or a float narrowing the suspect rule
-    "device_path": False,      # True: rank a device-supplied vector / template on the device path
+    "device_path": False,      # read by device_path_probe(); see "When it runs"
 },
 ```
 
@@ -750,20 +754,18 @@ over these defaults at read time, so `{"enabled": True}` alone uses the other de
 **When it runs.** With `enabled` true and the modality listed:
 
 - Server path (a `sample` is given): always, on the extracted probe.
-- Device path (`device_score` given): the server holds no sample, so the probe ranks what the
-  device extracted, passed as `verify(device_template=Extracted(...))`: `vector` for an embedding
-  modality, `template` for a template modality. It runs only when `device_path` is true. The
-  first applicable reason, in this order, is recorded when it does not run:
-  - `provider_matches_on_device`: the modality's provider is `DeviceReportedMatcher`, whose
-    `match()` raises, so the gallery cannot be ranked on the server whatever the device sends;
-  - `no_device_template`: the device supplied no vector (embedding kind) or template (template
-    kind);
-  - `device_path_disabled`: `device_path` is false.
-
-  The device's vector or template must come from the gallery's provider and model; nothing checks
-  it, as for a device template at `enrol()`. A device that misreports its score can also send a
-  template that matches nobody: the device-path probe detects only what the device honestly sends.
-  `device_template` with a `sample` raises `ValueError`.
+- Device path (`device_score` given): `verify()` accepts it only for a `DeviceReportedMatcher`
+  modality (§3.4), whose `match()` raises, so the gallery cannot be ranked on the server. The
+  probe does not run and records `provider_matches_on_device`, whatever the device sends in
+  `verify(device_template=Extracted(...))`. A server-matched modality refuses the device score
+  before the probe.
+- `impersonation.device_path_probe()` keeps its full rule for any provider, in this order:
+  `provider_matches_on_device` for `DeviceReportedMatcher`; `no_device_template` when the device
+  supplied no vector (embedding kind) or template (template kind); `device_path_disabled` when
+  `device_path` is false; otherwise it ranks the device's vector or template as it ranks a server
+  extraction. Through `verify()` only the first reason is reachable, so `device_path`,
+  `deviceVector` and `deviceTemplate` change nothing there.
+- `device_template` with a `sample` raises `ValueError`.
 
 No `verifyBiometric` argument turns the probe on or off.
 
@@ -836,8 +838,10 @@ null when the probe did not run. `matchedSubjectModel`, `matchedSubjectId` and `
 filled only for a caller holding `gql_biometric_identify_perms` (174003); with 174002 or 174004
 alone the caller gets the status, the verdict and the scores.
 Both also expose `impersonationSkipReason: String`. `verifyBiometric` takes `deviceVector: [Float!]`
-and `deviceTemplate: String` (base64) for the device-path probe; `BiometricVerifyLegInput` of
-`verifyBiometricMultimodal` takes the same two fields.
+and `deviceTemplate: String` (base64), passed to `verify()` as `device_template`;
+`BiometricVerifyLegInput` of `verifyBiometricMultimodal` takes the same two fields. On a
+`device_reported` modality, the only one taking `deviceScore`, the probe records
+`provider_matches_on_device` whatever they hold.
 
 **Deduplication.** `biometric` never reads deduplication tables (§2). A CONFIRMED merge removes
 the echo because `consolidate()` moves or supersedes the retired subject's active templates. An
@@ -1090,6 +1094,7 @@ verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=Fa
     modality, a modality twice, a leg without exactly one of `sample` and `device_score`, or a
     `device_template` with a `sample`;
   - `KeyError` for a modality with no registered provider;
+  - `DevicePathRefusedError` for a `device_score` leg whose provider is not `device_reported`;
   - `UnknownRiskProfileError` / `RiskProfileError` for the profile.
 - A leg that fails later (for example no face in its sample) raises and keeps the rows of the legs
   before it. The legs do not share a transaction: with audit on, the chain lock of one leg is never
