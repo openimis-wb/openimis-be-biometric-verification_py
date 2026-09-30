@@ -1232,6 +1232,7 @@ Read-only views of the configuration and the retention and audit state. No field
 | `biometricErasures` | relay connection | 174005 | `BiometricErasureGQLType` nodes |
 | `biometricErasureFilterValues` | query | 174005 | `BiometricErasureFilterValuesType` |
 | `biometricAuditChainStatus` | query | 174005 | `BiometricAuditChainCheckType`, null before the first check |
+| `biometricAuditChainHead` | query | 174005 | `BiometricAuditChainHeadType`, null while the chain is empty |
 | `verifyBiometricAuditChain` | mutation | 174008 and 174005 | `BiometricAuditChainCheckType` |
 
 **Decision criteria** (`risk_profiles.decision_criteria()`), built from `BIOMETRIC["FUSION"]`,
@@ -1272,6 +1273,12 @@ username. `biometricAuditChainStatus` returns the latest row
 `headSequence`, `headHash`, `divergenceKind` (`missing_event` | `broken_link` | `altered_row`,
 empty when intact), `divergenceSequence` (first divergent sequence, null when intact),
 `divergenceDetail`.
+
+**Chain head.** `biometricAuditChainHead` reads `BiometricAuditEvent` directly, never through the
+scoped event list (§6.15): `headSequence`, `headHash` and `createdAt` of the event with the highest
+`sequence`, and `eventCount`, the number of events in the table. It names no subject and states
+nothing about integrity; `biometricAuditChainStatus` does. Every caller holding 174005 gets the same
+values, whatever their location scope.
 
 The `biometric_audit_verify` command walks the chain once and stores the walk through
 `audit_chain.store_chain_check()`, the service `record_chain_check()` calls, with `checked_by`
@@ -1395,6 +1402,7 @@ changes nothing and records no event. An id that matches no alert keeps the erro
 **Not scoped.** `identifyBiometric` and the 174003 identity fields (a 1:N search over the whole
 gallery), the rest of the audit surface under 174005 (`biometricErasures`,
 `biometricErasureFilterValues`), the audit chain verification (`verifyBiometricAuditChain`, the
-`biometric_audit_verify` command) and its stored status (`biometricAuditChainStatus`), which walk and
-report every event whoever asks, and the 174007 configuration queries.
+`biometric_audit_verify` command), its stored status (`biometricAuditChainStatus`) and the chain
+head (`biometricAuditChainHead`), which walk and report every event whoever asks, and the 174007
+configuration queries.
 

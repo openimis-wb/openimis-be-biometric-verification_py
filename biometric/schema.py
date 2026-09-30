@@ -921,6 +921,24 @@ def _chain_check_type(check):
     )
 
 
+class BiometricAuditChainHeadType(graphene.ObjectType):
+    """The newest event of the whole audit chain and the number of events; names no subject."""
+    head_sequence = graphene.Int(required=True)
+    head_hash = graphene.String(required=True)
+    event_count = graphene.Int(required=True, description="Every event of the chain, whatever the caller's scope.")
+    created_at = graphene.DateTime(required=True, description="When the head event was recorded.")
+
+
+def _chain_head_type():
+    head = BiometricAuditEvent.objects.order_by("-sequence").only("sequence", "hash", "created_at").first()
+    if head is None:
+        return None
+    return BiometricAuditChainHeadType(
+        head_sequence=head.sequence, head_hash=head.hash,
+        event_count=BiometricAuditEvent.objects.count(), created_at=head.created_at,
+    )
+
+
 class VerifyBiometricAuditChainMutation(graphene.Mutation):
     """
     Walks the audit chain and stores the outcome read by biometricAuditChainStatus.
@@ -1131,6 +1149,11 @@ class Query(graphene.ObjectType):
         description="The last audit chain verification stored by verifyBiometricAuditChain; null before the first.",
     )
 
+    biometric_audit_chain_head = graphene.Field(
+        BiometricAuditChainHeadType,
+        description="The newest event of the whole audit chain and the event count, unscoped; null when empty.",
+    )
+
     @staticmethod
     def resolve_biometric_decision_criteria(root, info):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_config_perms)
@@ -1167,6 +1190,11 @@ class Query(graphene.ObjectType):
         from .audit_chain import latest_chain_check
 
         return _chain_check_type(latest_chain_check())
+
+    @staticmethod
+    def resolve_biometric_audit_chain_head(root, info):
+        _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        return _chain_head_type()
 
     @staticmethod
     def resolve_biometric_verification_records(root, info, **kwargs):

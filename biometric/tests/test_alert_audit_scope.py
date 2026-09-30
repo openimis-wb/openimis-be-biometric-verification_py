@@ -2,13 +2,17 @@
 biometricAlerts, biometricAuditEvents, their node lookups and the alert triage
 mutations act only on rows whose subject lies in the caller's location scope
 (docs/wb-biometric-dedup-seam.md §6.10, §6.15). A row naming no subject stays
-visible. The audit chain verification and its status are not scoped.
+visible. The audit chain verification, its status and the chain head are not
+scoped.
 """
 
 from types import SimpleNamespace
 
 import graphene
+from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
+from django.core.exceptions import PermissionDenied
+from django.db import connection
 from graphql_relay import to_global_id
 
 from biometric.apps import BiometricConfig
@@ -190,3 +194,36 @@ class TestAlertAndAuditScope(_MultimodalServiceTestCase):
         status = self._execute("query { biometricAuditChainStatus { ok checked headSequence } }", self.agent)
         self.assertIsNone(status.errors, status.errors)
         self.assertEqual(status.data["biometricAuditChainStatus"], check)
+
+    def test_the_chain_head_counts_every_event(self):
+        query = "query { biometricAuditChainHead { headSequence headHash eventCount createdAt } }"
+        head = BiometricAuditEvent.objects.order_by("-sequence").first()
+        expected = {
+            "headSequence": head.sequence, "headHash": head.hash,
+            "eventCount": BiometricAuditEvent.objects.count(),
+        }
+        self.assertEqual(expected["eventCount"], 3)
+        for user in (self.agent, self.admin):
+            with self.subTest(user=user.username):
+                result = self._execute(query, user)
+                self.assertIsNone(result.errors, result.errors)
+                data = dict(result.data["biometricAuditChainHead"])
+                self.assertTrue(data.pop("createdAt"))
+                self.assertEqual(data, expected)
+
+    def test_the_chain_head_needs_the_audit_right(self):
+        query = "query { biometricAuditChainHead { headSequence } }"
+        for user in (self.triager, AnonymousUser()):
+            with self.subTest(user=str(user)):
+                result = self._execute(query, user)
+                self.assertTrue(result.errors)
+                self.assertIsInstance(getattr(result.errors[0], "original_error", None), PermissionDenied)
+                self.assertIsNone((result.data or {}).get("biometricAuditChainHead"))
+
+    def test_the_chain_head_is_null_on_an_empty_chain(self):
+        BiometricAlert.objects.all().delete()
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM biometric_audit_event")
+        result = self._execute("query { biometricAuditChainHead { headSequence } }", self.agent)
+        self.assertIsNone(result.errors, result.errors)
+        self.assertIsNone(result.data["biometricAuditChainHead"])
