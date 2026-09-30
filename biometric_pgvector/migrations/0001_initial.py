@@ -1,7 +1,6 @@
 import django.db.models.deletion
 import pgvector.django
 from django.db import migrations, models
-from pgvector.django import VectorExtension
 
 
 class Migration(migrations.Migration):
@@ -13,7 +12,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        VectorExtension(),
+        # Other apps may use the extension, so rolling this app back leaves it installed.
+        migrations.RunSQL("CREATE EXTENSION IF NOT EXISTS vector", migrations.RunSQL.noop),
         migrations.CreateModel(
             name="BiometricVectorIndex",
             fields=[

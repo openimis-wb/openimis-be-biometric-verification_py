@@ -463,7 +463,8 @@ where the Postgres server has the `vector` extension.
 - Model `BiometricVectorIndex` (`db_table="biometric_vector_index"`): `template` OneToOne to
   `biometric.BiometricTemplate` (CASCADE, pk), `modality`, `provider`, `model_name`,
   `dim` int, `embedding` = `pgvector.django.VectorField()` without fixed dimensions.
-  Migration 0001 runs `pgvector.django.VectorExtension()` then creates the table.
+  Migration 0001 runs `CREATE EXTENSION IF NOT EXISTS vector` (needs a role allowed to create
+  extensions) then creates the table; its reverse drops the table and leaves the extension installed.
 - Kept in sync by signal receivers on `BiometricTemplate` (post_save / post_delete): an active
   embedding-kind row gets its side row upserted from the decrypted vector; a superseded or
   deleted row loses it. Management command `biometric_vector_reindex` backfills.
