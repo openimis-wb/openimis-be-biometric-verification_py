@@ -12,7 +12,7 @@ class SyntheticSubjectsMixin:
     def setUp(self):
         for target, replacement in (
             ("biometric.subjects.check_subject", lambda user, subject_model, subject_id: None),
-            ("biometric.subjects.scope_rows", lambda queryset, user: queryset),
+            ("biometric.subjects.scope_rows", lambda queryset, user, **options: queryset),
         ):
             patcher = patch(target, replacement)
             patcher.start()

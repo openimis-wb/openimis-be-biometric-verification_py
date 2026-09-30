@@ -16,6 +16,7 @@ from biometric.apps import BiometricConfig
 from biometric.audit_chain import ACTION_VERIFY, record_event
 from biometric.models import BiometricAlert, BiometricErasure
 from biometric.schema import Mutation, Query
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 from biometric.tests.test_audit_chain import AuditConfigMixin
 
 
@@ -37,7 +38,7 @@ class _User:
         return not perms or any(p in self.perms for p in perms)
 
 
-class TestNodeLookupNeedsTheAuditRight(AuditConfigMixin, TestCase):
+class TestNodeLookupNeedsTheAuditRight(SyntheticSubjectsMixin, AuditConfigMixin, TestCase):
 
     def setUp(self):
         super().setUp()

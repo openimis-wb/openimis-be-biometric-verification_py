@@ -121,7 +121,7 @@ class TestAuditTypes(SimpleTestCase):
         self.assertIn("trigger_event_id", fields)
 
 
-class _AuditSchemaTestCase(AuditConfigMixin, TestCase):
+class _AuditSchemaTestCase(SyntheticSubjectsMixin, AuditConfigMixin, TestCase):
 
     def setUp(self):
         super().setUp()

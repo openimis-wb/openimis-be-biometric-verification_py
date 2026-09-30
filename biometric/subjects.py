@@ -73,16 +73,17 @@ def check_subject(user, subject_model, subject_id):
         raise not_found
 
 
-def scope_rows(queryset, user):
+def scope_rows(queryset, user, *, keep_unattributed=False):
     """
     Rows of a biometric table (subject_model, subject_id) whose subject the
     user may see. Rows of a location-scoped subject model are kept when their
     subject is in the model's scoped queryset; rows of an unscoped model are
-    kept; rows naming no installed model are dropped.
+    kept; rows naming no installed model are dropped. With keep_unattributed,
+    rows whose subject_id is empty name no subject and are kept.
     """
     if bypasses_scope(user):
         return queryset
-    visible = Q(pk__in=[])
+    visible = Q(subject_id="") if keep_unattributed else Q(pk__in=[])
     for label in queryset.order_by().values_list("subject_model", flat=True).distinct():
         try:
             model = resolve_subject_model(label)
@@ -94,3 +95,13 @@ def scope_rows(queryset, user):
         scoped_ids = model.get_queryset(None, user).annotate(_subject_id=Cast("pk", CharField())).values("_subject_id")
         visible |= Q(subject_model=label, subject_id__in=scoped_ids)
     return queryset.filter(visible)
+
+
+def require_rows_in_scope(queryset, user, *, keep_unattributed=False):
+    """
+    SubjectRefusedError(SUBJECT_NOT_FOUND) when the queryset holds rows and none
+    of them is in the user's scope (scope_rows). An empty queryset passes: the
+    caller reports the missing row itself.
+    """
+    if queryset.exists() and not scope_rows(queryset, user, keep_unattributed=keep_unattributed).exists():
+        raise SubjectRefusedError(SUBJECT_NOT_FOUND, "No such row in scope.")

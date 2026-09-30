@@ -613,6 +613,18 @@ def _audit_queryset(queryset, info):
     return queryset
 
 
+def _scoped_audit_queryset(queryset, info):
+    """
+    _audit_queryset, cut to the rows whose subject lies in the caller's location
+    scope (subjects.scope_rows). A row naming no subject is kept. The audit chain
+    itself is never scoped: its verification reads BiometricAuditEvent directly.
+    """
+    from .subjects import scope_rows
+
+    queryset = _audit_queryset(queryset, info)
+    return scope_rows(queryset, info.context.user, keep_unattributed=True)
+
+
 class BiometricAuditEventGQLType(DjangoObjectType):
     """One hash-chained audit event. Holds identifiers, scores and counts, never biometric material."""
 
@@ -638,7 +650,7 @@ class BiometricAuditEventGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        return _audit_queryset(queryset, info)
+        return _scoped_audit_queryset(queryset, info)
 
     def resolve_payload(self, info):
         return _event_payload_for(self.action, self.payload, info)
@@ -680,7 +692,7 @@ class BiometricAlertGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        return _audit_queryset(queryset, info)
+        return _scoped_audit_queryset(queryset, info)
 
     def resolve_subject_model(self, info):
         return self.subject_model if _may_read_audit(info) else None
@@ -703,8 +715,18 @@ class BiometricAlertGQLType(DjangoObjectType):
         return str(self.trigger_event_id) if self.trigger_event_id else None
 
 
+def _require_alert_in_scope(user, alert_id):
+    """SubjectRefusedError(SUBJECT_NOT_FOUND) for an existing alert whose subject is outside the caller's scope."""
+    from .subjects import require_rows_in_scope
+
+    require_rows_in_scope(BiometricAlert.objects.filter(pk=alert_id), user, keep_unattributed=True)
+
+
 class AcknowledgeBiometricAlertMutation(graphene.Mutation):
-    """NEW -> ACKNOWLEDGED. An alert in any other state is a GraphQL error."""
+    """
+    NEW -> ACKNOWLEDGED. An alert in any other state is a GraphQL error, and so is
+    an alert whose subject is outside the caller's location scope (BIOMETRIC_SUBJECT_NOT_FOUND).
+    """
 
     class Arguments:
         id = graphene.String(required=True, description="The alert's UUID.")
@@ -719,11 +741,15 @@ class AcknowledgeBiometricAlertMutation(graphene.Mutation):
 
         from .audit_rules import acknowledge_alert
 
+        _require_alert_in_scope(user, id)
         return acknowledge_alert(id, actor=user.username)
 
 
 class ResolveBiometricAlertMutation(graphene.Mutation):
-    """NEW or ACKNOWLEDGED -> RESOLVED with an optional note. A resolved alert is a GraphQL error."""
+    """
+    NEW or ACKNOWLEDGED -> RESOLVED with an optional note. A resolved alert is a GraphQL error,
+    and so is an alert whose subject is outside the caller's location scope (BIOMETRIC_SUBJECT_NOT_FOUND).
+    """
 
     class Arguments:
         id = graphene.String(required=True, description="The alert's UUID.")
@@ -739,6 +765,7 @@ class ResolveBiometricAlertMutation(graphene.Mutation):
 
         from .audit_rules import resolve_alert
 
+        _require_alert_in_scope(user, id)
         return resolve_alert(id, actor=user.username, note=note or "")
 
 

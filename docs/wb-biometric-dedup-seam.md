@@ -1110,7 +1110,8 @@ grant them to no role.
   - Arguments: `sequence`, `sequence_Lt`, `sequence_Gt`, `action`, `action_Startswith`, `actor`,
     `subjectModel`, `subjectId`, `modality`, `createdAt_Gte`, `createdAt_Lte`, `orderBy`, `first`,
     `after`, `before`, `last`, `offset`.
-  - Right: 174005.
+  - Right: 174005. Location scope (§6.15): a caller without the bypass sees the events whose subject
+    is in scope and those naming no subject (empty `subjectId`).
 - `biometricAlerts`: `BiometricAlertGQLType` nodes ordered by `-triggeredAt`, `-id`.
   - Node fields: `id`, `ruleKind`, `severity`, `state`, `title`, `detail`, `subjectModel`,
     `subjectId`, `occurrences`, `triggeredAt`, `lastSeenAt`, `triggerEventId`, `acknowledgedBy`,
@@ -1118,10 +1119,13 @@ grant them to no role.
   - Arguments: `state`, `severity`, `ruleKind`, `open` (true: NEW or ACKNOWLEDGED only; false:
     RESOLVED only), `subjectModel`, `subjectId`, `triggeredAt_Gte`, `triggeredAt_Lte`, `orderBy`,
     `first`, `after`, `before`, `last`, `offset`.
-  - Right: 174005.
+  - Right: 174005. Location scope (§6.15), as for `biometricAuditEvents`; `totalCount` counts the
+    visible alerts only.
 - `acknowledgeBiometricAlert(id: String!)` and `resolveBiometricAlert(id: String!, note: String)`
   take the alert's raw UUID and return the alert. An invalid transition is a GraphQL error.
-  Right: 174006. `detail`, `subjectModel` and `subjectId` are null for a caller without 174005;
+  Right: 174006. An alert whose subject is outside the caller's location scope is refused with
+  `BIOMETRIC_SUBJECT_NOT_FOUND` before anything is written (§6.15); an alert naming no subject is
+  open to every holder of 174006. `detail`, `subjectModel` and `subjectId` are null for a caller without 174005;
   `BiometricAlertGQLType` declares `subjectModel` and `subjectId` as nullable `String` for that
   reason.
 - **Sorting.** `orderBy` on `biometricAuditEvents`, `biometricAlerts`, `biometricErasures`,
@@ -1145,7 +1149,8 @@ grant them to no role.
 - **Relay `node`.** The assembled openIMIS schema declares a root `node` field that resolves a
   global id through the type's `get_queryset`. `BiometricAuditEventGQLType`,
   `BiometricAlertGQLType` and `BiometricErasureGQLType` require 174005 there too, so `node`
-  returns a `PermissionDenied` error without it.
+  returns a `PermissionDenied` error without it. The event and alert types also apply the location
+  scope (§6.15): `node` returns null for a row outside it.
 - `identifyBiometric` passes `actor=user.username` to `identify()`, and `biometricTemplates`
   records `template.list` when audit is on. Their arguments and results are unchanged.
 
@@ -1369,15 +1374,27 @@ An out-of-scope subject reports `NOT_FOUND`, as core's lists show neither case. 
 (`enrol()`, `verify()`, …) take an actor string and do not check the subject; the check belongs to
 the GraphQL caller.
 
-**Connections.** `biometricVerificationRecords` and `biometricMultimodalDecisions`, and the root
-`node` lookup of both types, go through `scope_rows` in their type's `get_queryset`: a row of a
+**Connections.** `biometricVerificationRecords`, `biometricMultimodalDecisions`, `biometricAlerts` and
+`biometricAuditEvents`, and the root `node` lookup of the four types, go through `scope_rows` in
+their type's `get_queryset`: a row of a
 scoped model is kept when its `subject_id` is the text form of a primary key in the model's
 scoped queryset; a row of an unscoped model is kept; a row whose `subject_model` names no
 installed model is dropped for a caller without the bypass. Each resolve reads the distinct
 `subject_model` values of the table once.
 
+`scope_rows(queryset, user, keep_unattributed=True)`, used for alerts and audit events, also keeps
+the rows whose `subject_id` is empty: an `identify` event or an `ACCESS_BURST` alert names no
+subject. A row is judged by its own `subject_model` and `subject_id` only; identities inside an
+event payload or an alert detail are governed by the 174003 stripping (§6.10).
+
+**Alert triage.** `acknowledgeBiometricAlert` and `resolveBiometricAlert` (174006) run
+`require_rows_in_scope` on the alert after the right check and before the transition. An existing
+alert outside the caller's scope raises `SubjectRefusedError` with `BIOMETRIC_SUBJECT_NOT_FOUND`,
+changes nothing and records no event. An id that matches no alert keeps the error it had before.
+
 **Not scoped.** `identifyBiometric` and the 174003 identity fields (a 1:N search over the whole
-gallery), the audit surface under 174005 (`biometricAuditEvents`, `biometricAlerts`,
-`biometricErasures`, `biometricErasureFilterValues`, `biometricAuditChainStatus`), the alert
-triage under 174006 and the 174007 configuration queries.
+gallery), the rest of the audit surface under 174005 (`biometricErasures`,
+`biometricErasureFilterValues`), the audit chain verification (`verifyBiometricAuditChain`, the
+`biometric_audit_verify` command) and its stored status (`biometricAuditChainStatus`), which walk and
+report every event whoever asks, and the 174007 configuration queries.
 
