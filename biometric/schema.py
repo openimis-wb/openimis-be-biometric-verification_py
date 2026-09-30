@@ -556,11 +556,15 @@ def _may_identify(info):
 
 def _event_payload_for(action, payload, info):
     """The event payload, without other subjects' identities unless the caller may identify."""
-    from .audit_chain import ACTION_IDENTIFY, ACTION_IMPERSONATION
+    from .audit_chain import ACTION_CONSOLIDATE, ACTION_IDENTIFY, ACTION_IMPERSONATION
 
     payload = dict(payload) if isinstance(payload, dict) else {}
     if _may_identify(info):
         return payload
+    # Keys naming a subject other than the event's own.
+    other_subject_keys = {ACTION_IDENTIFY: ("exclude_subject",), ACTION_CONSOLIDATE: ("retired_id",)}
+    for key in other_subject_keys.get(action, ()):
+        payload.pop(key, None)
     if action == ACTION_IDENTIFY and isinstance(payload.get("matches"), list):
         payload["matches"] = [
             {k: v for k, v in match.items() if k not in _MATCH_IDENTITY_KEYS} if isinstance(match, dict) else match

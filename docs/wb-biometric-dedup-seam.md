@@ -1055,7 +1055,9 @@ grant them to no role.
   - an `identify` event's `matches` lose `subject_model`, `subject_id` and `template_id`, keeping
     `score`;
   - an `impersonation.suspected` event's payload and an `IMPERSONATION_SUSPECTED` alert's detail
-    lose `matched_subject_model`, `matched_subject_id` and `matched_template_id`.
+    lose `matched_subject_model`, `matched_subject_id` and `matched_template_id`;
+  - an `identify` event's payload loses `exclude_subject`, and a `template.consolidate` event's
+    payload loses `retired_id`.
 
   The stored rows are unchanged.
 - **Relay `node`.** The assembled openIMIS schema declares a root `node` field that resolves a
