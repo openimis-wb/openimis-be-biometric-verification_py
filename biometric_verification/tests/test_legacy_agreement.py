@@ -56,10 +56,10 @@ class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
             LegacyDeepFaceProvider, "get_embedding", return_value=self.PROBE_VECTOR,
         )
         self._get_embedding_patch.start()
-        # New path computes the probe embedding via extract() -> _get_embedding();
+        # New path computes the probe embedding via extract() -> _represent();
         # stub it too so verify() doesn't need a real DeepFace install.
         self._new_get_embedding_patch = patch.object(
-            NewDeepFaceProvider, "_get_embedding", return_value=self.PROBE_VECTOR,
+            NewDeepFaceProvider, "_represent", return_value={"embedding": self.PROBE_VECTOR},
         )
         self._new_get_embedding_patch.start()
 
@@ -77,7 +77,7 @@ class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
 
     def test_same_verdict_at_default_thresholds(self):
         from biometric.models import BiometricTemplate
-        from biometric.services import verify
+        from biometric.services import PREPROCESSING_KEY, verify
 
         legacy_provider = self._LegacyDeepFaceProvider()
         legacy_result = legacy_provider.verify_from_embedding(
@@ -88,6 +88,7 @@ class TestLegacyAndNewVerifyAgreeOnDeepFaceThreshold(TestCase):
         BiometricTemplate.objects.create(
             subject_model="individual.Individual", subject_id="s1", modality="face", kind="embedding",
             vector=self.REFERENCE_VECTOR, provider="deepface", model_name=legacy_provider.model_name,
+            metadata={PREPROCESSING_KEY: self._NewDeepFaceProvider.preprocessing},
         )
         new_result = verify(
             "individual.Individual", "s1", "face", sample=b"unused", actor="tester",
