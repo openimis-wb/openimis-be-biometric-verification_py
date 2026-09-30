@@ -48,7 +48,9 @@ class _User:
         self.id = None if anonymous else 1
 
     def has_perms(self, perms):
-        return all(p in self.perms for p in perms)
+        # Same semantics as core.models.User.has_perms: an empty list passes,
+        # otherwise holding any one listed right is enough.
+        return not perms or any(p in self.perms for p in perms)
 
 
 def _execute(query, user):
@@ -333,6 +335,23 @@ class TestAuditChainStatus(_AdminConfigMixin, AuditConfigMixin, TestCase):
             with self.subTest(perms=perms):
                 self.assertTrue(_denied(_execute(VERIFY_MUTATION, _User(perms=perms))))
         self.assertEqual(BiometricAuditChainCheck.objects.count(), 0)
+
+    def test_verify_needs_both_the_audit_and_the_verify_right(self):
+        cases = (
+            ("audit right only", AUDIT_PERMS, True),
+            ("verify right only", AUDIT_VERIFY_PERMS, True),
+            ("both rights", AUDIT_PERMS + AUDIT_VERIFY_PERMS, False),
+        )
+        for label, perms, refused in cases:
+            with self.subTest(label):
+                before = BiometricAuditChainCheck.objects.count()
+                result = _execute(VERIFY_MUTATION, _User(perms=perms))
+                if refused:
+                    self.assertTrue(_denied(result))
+                    self.assertEqual(BiometricAuditChainCheck.objects.count(), before)
+                else:
+                    self.assertIsNone(result.errors, result.errors)
+                    self.assertEqual(BiometricAuditChainCheck.objects.count(), before + 1)
 
     def test_status_is_null_before_any_check(self):
         result = _execute(STATUS_QUERY, _User(perms=AUDIT_PERMS))

@@ -797,8 +797,9 @@ class VerifyBiometricAuditChainMutation(graphene.Mutation):
     @classmethod
     def mutate(cls, root, info):
         user = info.context.user
-        perms = list(BiometricConfig.gql_biometric_audit_verify_perms) + list(BiometricConfig.gql_biometric_audit_perms)
-        _require_perms(user, perms)
+        # has_perms() passes on any one listed right, so each list is checked on its own.
+        _require_perms(user, BiometricConfig.gql_biometric_audit_verify_perms)
+        _require_perms(user, BiometricConfig.gql_biometric_audit_perms)
 
         from .audit_chain import record_chain_check
 
