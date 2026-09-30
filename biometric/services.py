@@ -489,8 +489,9 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
     modality_thresholds. Callers pass no fusion rule of their own.
 
     The legs, the modalities' providers (a device-score leg needs a
-    device_reported provider) and the profile are checked before any leg runs; a leg that fails later (e.g. no face in its sample) leaves
-    the rows of the legs before it and stores no decision.
+    device_reported provider) and the profile are checked before any leg
+    runs; a leg that fails later (e.g. no face in its sample) leaves the rows
+    of the legs before it and stores no decision.
 
     The fused decision is stored as a BiometricMultimodalDecision row listing
     the leg verification ids, and recorded as a verify.multimodal audit event

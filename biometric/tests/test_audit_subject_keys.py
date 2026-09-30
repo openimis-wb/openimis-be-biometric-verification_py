@@ -31,7 +31,8 @@ class TestSubjectNamingKeys(_AuditSchemaTestCase):
     def _payloads(self, perms):
         result = _execute(QUERY, _User(perms=perms))
         self.assertIsNone(result.errors, result.errors)
-        return {e["node"]["action"]: json.loads(e["node"]["payload"]) for e in result.data["biometricAuditEvents"]["edges"]}
+        edges = result.data["biometricAuditEvents"]["edges"]
+        return {e["node"]["action"]: json.loads(e["node"]["payload"]) for e in edges}
 
     def test_withheld_without_the_identify_right(self):
         payloads = self._payloads(AUDIT_PERMS)
