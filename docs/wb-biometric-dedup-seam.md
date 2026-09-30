@@ -343,7 +343,9 @@ The existing beneficiary/payment summary queries and their task flow are **untou
 record_candidate(c: Candidate, *, source: str) -> tuple[DuplicateCandidate, bool]
 ```
 `get_or_create` on the unique key. A `DISMISSED` row is never reopened. An `OPEN` row keeps the
-higher score and merges evidence. Returns `(row, created)`.
+higher score and merges evidence: `evidence["columns"]` becomes the union of the recorded and
+the incoming columns, so a pair matched on several identifier keys keeps every matched key; on
+any other evidence key the incoming value wins. Returns `(row, created)`.
 
 ```python
 run_scan(*, kinds: list[str] | None = None, actor: str) -> dict   # counts per kind
@@ -354,16 +356,29 @@ Management command `scan_duplicates [--kind KIND]`. `run_scan` reads `ScanState`
 A subject written while the scan iterates is newer than the captured cursor and is revisited by
 the next scan; `record_candidate` is idempotent, so the revisit is harmless.
 
+Each source runs in its own transaction. A source that raises is logged, its candidates and its
+`ScanState` watermark are rolled back, and the other sources still run. The returned dict holds
+`{kind: count}` for the sources that completed and, only when a source failed,
+`"failed": {kind: error}`. `scan_duplicates` prints one line per source and exits non-zero
+(`CommandError`) when any source failed; `runDuplicateScan` records the mutation as failed with
+`deduplication.mutation.failed_to_run_scan` and the failed kinds in `detail`, after the other
+sources' candidates are recorded.
+
 ```python
 resolve(candidate, *, decision: "same"|"different", keep: str | None = None, actor, note="")
 ```
+`resolve` runs in one transaction that first locks both subject rows (`SELECT … FOR UPDATE`,
+one row at a time, in sorted id order), then the candidate row, before any check. Two resolves
+sharing a subject, such as (A,B) and (A,C) with opposite keeps, therefore run one after the
+other, and the second sees the first one's merge.
+
 `different` → `DISMISSED`. `same` → `CONFIRMED`, `keep` defaults to `subject_a`, then
 `merge_subjects(kept, retired, actor)`:
 
 - Precondition: the subject to retire holds no live enrolment row. While it still has a
   non-deleted `social_protection.Beneficiary`, a non-deleted `individual.GroupIndividual`, or a
   non-deleted `social_protection.GroupBeneficiary` on one of its groups, `resolve` and
-  `merge_subjects` raise `ValueError("deduplication.resolve.retired_subject_enrolled: …")` naming
+  `merge_subjects` raise a `ResolveRefusal` reading `deduplication.resolve.retired_subject_enrolled: …`, naming
   the blocking rows by kind and count, before any write; the candidate stays `OPEN`. The rows are
   removed first (soft delete), then the merge is retried. Payroll selects active beneficiaries
   without reading the individual, so a soft-deleted individual with a live row stays payable.
@@ -383,22 +398,69 @@ together. In the merge transaction every other `OPEN` candidate on the same unor
 `CONFIRMED` with the same decision, and a `DISMISSED` one stays dismissed. A `same` on a candidate
 whose pair already has a `CONFIRMED` sibling becomes `CONFIRMED` without a second merge when `keep`
 is the surviving subject and the other subject is deleted; a `keep` naming the deleted subject is
-refused with `deduplication.resolve.keep_contradicts_merge`.
+refused with `deduplication.resolve.keep_contradicts_merge`. A `different` on a candidate whose
+pair already has a `CONFIRMED` sibling is refused with `deduplication.resolve.pair_already_merged`;
+the candidate stays `OPEN`.
+
+```python
+check_resolve(candidate, *, decision, keep=None) -> None   # raises ResolveRefusal, writes nothing
+```
+`check_resolve` is the read-only twin of `resolve`. It raises the `ResolveRefusal` that `resolve`
+would raise for the same decision and returns `None` when `resolve` would accept it. It reads the
+pair, the subjects and their siblings and takes no lock, so a concurrent `resolve` can still change
+the outcome; `resolve` re-checks under its locks. Both call `plan_resolve` for the checks on the
+pair (`keep_not_in_pair`, `keep_contradicts_merge`, `subject_deleted`, `pair_already_merged`, and
+the sibling-confirmed pass-through, which plans no merge), and the enrolment guard of
+`merge_subjects` (`retired_subject_enrolled`), so the two cannot drift. A candidate that is no
+longer `OPEN` needs no decision and is never refused. An unknown `decision` raises `ValueError`.
 
 Review through Tasks Management stays available: `create_review_tasks(candidate_ids, actor)`
 creates one `tasks_management.Task` per candidate (`source="deduplication_candidate"`, `data` =
-candidate summary, `task` FK set); the existing `task_service.complete_task` binding gains a
-branch: when the completed task's source is `deduplication_candidate`, call `resolve()` with the
-decision read from `task.json_ext["additional_resolve_data"]` (`{"decision", "keep", "note"}`).
+candidate summary, `task` FK set). A `pre_save` receiver on `tasks_management.Task` bridges the
+completion: when a `deduplication_candidate` task moves to `COMPLETED` and its candidate is
+`OPEN`, it calls `resolve()` with the decision of the approver whose action completes the task,
+`task.json_ext["additional_resolve_data"][<id of that user>]` (`{"decision", "keep", "note"}`).
+Task resolution stores one entry per approver, keyed by user id, and the completing user is the
+task's `user_updated`. The receiver runs inside `TaskService.complete_task`'s transaction:
+
+- a refusal (any `deduplication.resolve.*` code, or `deduplication.resolve.decision_missing` when
+  the completing approver recorded no decision) rolls the completion back; the task keeps its
+  previous status, the candidate stays `OPEN`, `complete_task` returns `success: False` with the
+  refusal in `detail`, and the refusal is logged with the task and candidate ids. The approvers'
+  resolve data stays on the task, so completing again once the cause is removed applies it;
+- a candidate that is no longer `OPEN` (resolved from the candidate page) needs no decision, and
+  the task completes.
+
+On the `resolveTask` path, tasks_management's `on_task_resolve` calls `complete_task` and
+discards its result, so the reviewer's `resolveTask` mutation still reports success; the task
+stays open and the refusal is in the server log. The approver therefore learns the refusal before
+submitting: the task form calls `duplicateCandidateResolveCheck` (§4.4) whenever the decision or the
+kept record changes, shows the translated refusal and disables the approve button while the check
+refuses.
 
 ### 4.4 GraphQL — graphene 2 (existing fields kept)
 
 Query `duplicateCandidates(status, kind, subjectId, first, offset)` following the connection
-style the module already uses. Mutations `runDuplicateScan(kinds)`,
+style the module already uses. Query `duplicateCandidateResolveCheck(candidateId, decision, keep)`
+returns `{ ok, code, message }` by running `check_resolve` and writes nothing: `ok` is false with the
+refusal's `deduplication.resolve.<reason>` code and English message when `resolveDuplicateCandidate`
+would refuse the decision, and true (`code` and `message` null) otherwise, including for a candidate
+that is no longer `OPEN`. It needs `gql_query_duplicates_perms`, like the candidate queries; a
+caller without it gets the `Unauthorized` GraphQL error and no result. An unknown `decision` or a
+missing candidate is a GraphQL error. Mutations `runDuplicateScan(kinds)`,
 `resolveDuplicateCandidate(id, decision, keep, note)`, `createDuplicateReviewTasks(ids)`.
 Rights: `gql_resolve_duplicate_perms=["172003"]`, `gql_run_scan_perms=["172004"]`,
 `gql_query_duplicates_perms=["172005"]` via module configuration; review-task creation keeps
 `172001`.
+
+Every refusal of `resolve` is a `ResolveRefusal` (a `ValueError`) carrying its code:
+`deduplication.resolve.keep_not_in_pair`, `subject_deleted`, `keep_contradicts_merge`,
+`retired_subject_enrolled`, `pair_already_merged` and `decision_missing` (task bridge only);
+`str()` starts with the code. `resolveDuplicateCandidate` records a refusal in the mutation log
+as `{"message": <readable English text>, "code": <code>, "detail": <code and details>}`. The
+openIMIS journal prints `[code] message` and shows `detail` when expanded; it translates
+neither, and no backend module ships compiled message catalogues, so the message is English.
+Screens that read the mutation log themselves translate the `code`.
 
 ### 4.5 Tests
 registry and `order_pair`; demographic source on fixture individuals (json_ext column);
