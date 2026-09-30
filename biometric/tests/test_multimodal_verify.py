@@ -200,7 +200,8 @@ def _user(perms=None, anonymous=False):
     if perms is None:
         user.has_perms.return_value = True
     else:
-        user.has_perms.side_effect = lambda wanted: all(p in perms for p in wanted)
+        # core.models.User.has_perms: an empty list passes, otherwise any one listed right is enough.
+        user.has_perms.side_effect = lambda wanted: not wanted or any(p in perms for p in wanted)
     return user
 
 

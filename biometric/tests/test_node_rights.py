@@ -33,7 +33,8 @@ class _User:
         self.id = 1
 
     def has_perms(self, perms):
-        return all(p in self.perms for p in perms)
+        # core.models.User.has_perms: an empty list passes, otherwise any one listed right is enough.
+        return not perms or any(p in self.perms for p in perms)
 
 
 class TestNodeLookupNeedsTheAuditRight(AuditConfigMixin, TestCase):
