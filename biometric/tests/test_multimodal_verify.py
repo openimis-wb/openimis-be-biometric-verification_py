@@ -221,7 +221,7 @@ class TestMultimodalMutation(_MultimodalTestCase):
 
     def _execute(self, risk_profile="\"\"", user=None):
         schema = graphene.Schema(query=Query, mutation=Mutation)
-        return schema.execute(MUTATION % risk_profile, context_value=SimpleNamespace(user=user or _user()))
+        return schema.execute(MUTATION % risk_profile, context_value=SimpleNamespace(user=user or _user(), headers={}))
 
     def test_accepts_no_rule_arguments(self):
         arguments = set(VerifyBiometricMultimodalMutation.Arguments.__dict__) - {

@@ -277,7 +277,7 @@ class TestVerifyRiskProfileOverGraphQL(_MultimodalServiceTestCase):
         user.username = "tester"
         user.has_perms.return_value = True
         schema = graphene.Schema(query=Query, mutation=Mutation)
-        return schema.execute(self.QUERY % risk_profile, context_value=SimpleNamespace(user=user))
+        return schema.execute(self.QUERY % risk_profile, context_value=SimpleNamespace(user=user, headers={}))
 
     def test_unknown_profile_is_a_graphql_error_not_verified_false(self):
         BiometricConfig.risk_profiles = {"voice_strict": {"modality_thresholds": {"voice_device": 70}}}
@@ -478,7 +478,7 @@ class TestEnrolQualityRefusalOverGraphQL(_MultimodalServiceTestCase):
         user.username = "tester"
         user.has_perms.return_value = True
         schema = graphene.Schema(query=Query, mutation=Mutation)
-        return schema.execute(self.QUERY % sample, context_value=SimpleNamespace(user=user))
+        return schema.execute(self.QUERY % sample, context_value=SimpleNamespace(user=user, headers={}))
 
     def test_enforce_refusal_is_a_graphql_error_with_extensions(self):
         BiometricConfig.quality = {"mode": "enforce"}

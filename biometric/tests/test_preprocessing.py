@@ -251,11 +251,11 @@ class TestVerifyAuditAndGraphQL(AuditConfigMixin, _PreprocessingTestCase):
         result = schema.execute(
             'mutation { verifyBiometric(subjectId: "s1", modality: "face", sample: "%s") '
             "{ verified confidence templateSkipReason } }" % sample,
-            context_value=SimpleNamespace(user=user),
+            context_value=SimpleNamespace(user=user, headers={}),
         )
         trail = schema.execute(
             'query { biometricVerifications(subjectId: "s1") { templateSkipReason } }',
-            context_value=SimpleNamespace(user=user),
+            context_value=SimpleNamespace(user=user, headers={}),
         )
 
         self.assertIsNone(result.errors, result.errors)

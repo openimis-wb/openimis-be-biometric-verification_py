@@ -96,6 +96,13 @@ def _clamp_top_k(top_k):
     return max(1, min(int(top_k), int(BiometricConfig.max_top_k)))
 
 
+def _check_csrf(info):
+    """core's CSRF check, run first by every mutation of this app as OpenIMISMutation runs it."""
+    from core.schema import _check_csrf_token
+
+    _check_csrf_token(info.context)
+
+
 def _require_perms(user, perms):
     if user.is_anonymous:
         raise PermissionDenied(_("unauthorized"))
@@ -380,6 +387,7 @@ class EnrolBiometricMutation(graphene.Mutation):
 
     @classmethod
     def mutate(cls, root, info, subject_id, modality, sample, subject_model=None, position=None, metadata=None):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
 
@@ -440,6 +448,7 @@ class VerifyBiometricMutation(graphene.Mutation):
     def mutate(cls, root, info, subject_id, modality, subject_model=None, sample=None, position=None,
                device_score=None, fallback=False, device_id="", context=None, risk_profile=None,
                device_vector=None, device_template=None):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
 
@@ -481,6 +490,7 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
     @classmethod
     def mutate(cls, root, info, subject_id, legs, subject_model=None, risk_profile=None, fallback=False,
                device_id="", context=None):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
 
@@ -526,6 +536,7 @@ class RecordBiometricConsentMutation(graphene.Mutation):
 
     @classmethod
     def mutate(cls, root, info, subject_id, modality, granted, subject_model=None, note=None):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
 
@@ -687,6 +698,7 @@ class AcknowledgeBiometricAlertMutation(graphene.Mutation):
 
     @classmethod
     def mutate(cls, root, info, id):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_alert_perms)
 
@@ -706,6 +718,7 @@ class ResolveBiometricAlertMutation(graphene.Mutation):
 
     @classmethod
     def mutate(cls, root, info, id, note=None):
+        _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_alert_perms)
 
@@ -877,6 +890,7 @@ class VerifyBiometricAuditChainMutation(graphene.Mutation):
 
     @classmethod
     def mutate(cls, root, info):
+        _check_csrf(info)
         user = info.context.user
         # has_perms() passes on any one listed right, so each list is checked on its own.
         _require_perms(user, BiometricConfig.gql_biometric_audit_verify_perms)
