@@ -51,9 +51,11 @@ except ImportError:
 
 class BiometricCandidateSource(CandidateSource):
     """
-    Scans active templates for one modality, runs identify() for each against
-    the rest of the gallery, and yields a Candidate per match at or above
+    Scans active templates for one modality, ranks each against the rest of
+    the gallery, and yields a Candidate per match at or above
     DEDUP_THRESHOLD[modality]. watermark() advances on (date_updated, id).
+    On the numpy and template paths the gallery is read and decrypted once per
+    scan (services.Gallery); on the pgvector path each probe runs identify().
     Templates recorded under another preprocessing than the modality's
     provider (§6.13) are neither scanned nor matched.
     """
@@ -64,13 +66,15 @@ class BiometricCandidateSource(CandidateSource):
         self.modality = modality
 
     def scan(self, since: "Optional[Watermark]" = None):
+        from . import crypto
         from .apps import BiometricConfig
         from .models import BiometricTemplate
         from .registry import ProviderRegistry
-        from .services import comparable_preprocessing, identify, log_preprocessing_skips
+        from .services import Gallery, comparable_preprocessing, identify, log_preprocessing_skips
 
         threshold = BiometricConfig.dedup_threshold.get(self.modality, 0.0)
         provider = None
+        gallery = None
 
         queryset = BiometricTemplate.objects.filter(
             modality=self.modality, validity_to__isnull=True,
@@ -86,26 +90,29 @@ class BiometricCandidateSource(CandidateSource):
         for template in queryset.iterator():
             if provider is None:
                 provider = ProviderRegistry.get_provider(self.modality)
-            # identify() filters the gallery side; a probe row under another
-            # preprocessing is left out here.
+                # The pgvector path ranks in the database and decrypts nothing;
+                # the numpy and template paths share one decrypted gallery.
+                if not (provider.kind == "embedding" and BiometricConfig.vector_index == "pgvector"):
+                    gallery = Gallery(provider, self.modality)
+            # The gallery is filtered on preprocessing already; a probe row under
+            # another preprocessing is left out here.
             if not comparable_preprocessing(template, provider):
                 skipped += 1
                 continue
-            probe_vector = template.vector
-            probe_template = template.template
-            if template.encrypted:
-                from . import crypto
-                key = crypto.row_key(True, BiometricConfig.template_key)
-                probe_vector = crypto.decrypt_vector(probe_vector, key)
-                probe_template = crypto.decrypt_bytes(probe_template, key)
+            probe_vector, probe_template = self._probe(template, gallery, crypto, BiometricConfig.template_key)
 
-            matches = identify(
-                self.modality,
-                vector=probe_vector,
-                template=probe_template,
-                scope=None,
-                exclude_subject=template.subject_id,
-            )
+            if gallery is not None:
+                matches = gallery.rank(
+                    vector=probe_vector, template=probe_template, exclude_subject=template.subject_id,
+                )
+            else:
+                matches = identify(
+                    self.modality,
+                    vector=probe_vector,
+                    template=probe_template,
+                    scope=None,
+                    exclude_subject=template.subject_id,
+                )
             for match in matches:
                 if match.score is None or match.score < threshold:
                     continue
@@ -129,6 +136,19 @@ class BiometricCandidateSource(CandidateSource):
                     },
                 )
         log_preprocessing_skips(logger, skipped, self.modality, "BiometricCandidateSource.scan()")
+
+    @staticmethod
+    def _probe(template, gallery, crypto, key):
+        """(vector, template) of a probe row: the gallery's decrypted value when the row is in it."""
+        if gallery is not None:
+            try:
+                stored = gallery.stored_value(template.id)
+            except KeyError:
+                pass
+            else:
+                return (stored, None) if gallery.kind == "embedding" else (None, stored)
+        row_key = crypto.row_key(template.encrypted, key)
+        return crypto.decrypt_vector(template.vector, row_key), crypto.decrypt_bytes(template.template, row_key)
 
     def watermark(self):
         from .models import BiometricTemplate

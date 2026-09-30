@@ -610,39 +610,77 @@ def _comparable_gallery(provider, modality, scope, exclude_subject, kind):
     return rows
 
 
+class Gallery:
+    """
+    The comparable gallery of one modality's provider and model (numpy or
+    template path), decrypted once and ranked against any number of probes.
+    rank() drops exclude_subject's rows before the top_k cut, as identify()
+    drops them from its query.
+    """
+
+    def __init__(self, provider, modality, scope=None, exclude_subject=None):
+        from . import crypto
+        from .apps import BiometricConfig
+
+        self.provider = provider
+        self.kind = provider.kind
+        self.rows = _comparable_gallery(provider, modality, scope, exclude_subject, self.kind)
+        key = BiometricConfig.template_key
+        if self.kind == "embedding":
+            self.stored = [crypto.decrypt_vector(row.vector, crypto.row_key(row.encrypted, key)) for row in self.rows]
+        else:
+            self.stored = [crypto.decrypt_bytes(row.template, crypto.row_key(row.encrypted, key)) for row in self.rows]
+        self._index = {str(row.id): position for position, row in enumerate(self.rows)}
+        self._unit = None
+
+    def stored_value(self, template_id):
+        """The decrypted vector or template of a gallery row; KeyError when the row is not in the gallery."""
+        return self.stored[self._index[str(template_id)]]
+
+    def rank(self, *, vector=None, template=None, top_k=5, exclude_subject=None) -> List[Match]:
+        positions = [
+            i for i, row in enumerate(self.rows)
+            if exclude_subject is None or row.subject_id != str(exclude_subject)
+        ]
+        if not positions:
+            return []
+        if self.kind == "embedding":
+            return self._rank_embedding(vector, top_k, positions)
+        scored = [(self.provider.match(template, self.stored[i]), self.rows[i]) for i in positions]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [
+            Match(subject_model=row.subject_model, subject_id=row.subject_id, template_id=str(row.id), score=score)
+            for score, row in scored[:top_k]
+        ]
+
+    def _rank_embedding(self, probe_vector, top_k, positions):
+        """gallery @ probe after L2 normalisation."""
+        import numpy as np
+
+        if self._unit is None:
+            gallery = np.array(self.stored, dtype=float)
+            norms = np.linalg.norm(gallery, axis=1)
+            norms[norms == 0] = 1.0
+            self._unit = gallery / norms[:, None]
+        probe = np.array(probe_vector, dtype=float)
+        probe_norm = np.linalg.norm(probe) or 1.0
+
+        similarities = self._unit[positions] @ (probe / probe_norm)
+        order = np.argsort(-similarities)[:top_k]
+        return [
+            Match(
+                subject_model=self.rows[positions[i]].subject_model,
+                subject_id=self.rows[positions[i]].subject_id,
+                template_id=str(self.rows[positions[i]].id),
+                score=float(similarities[i]),
+            )
+            for i in order
+        ]
+
+
 def _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subject):
     """Portable path: gallery @ probe after L2 normalisation. Always available."""
-    import numpy as np
-
-    from . import crypto
-    from .apps import BiometricConfig
-
-    rows = _comparable_gallery(provider, modality, scope, exclude_subject, "embedding")
-    if not rows:
-        return []
-
-    key = BiometricConfig.template_key
-    vectors = [crypto.decrypt_vector(row.vector, crypto.row_key(row.encrypted, key)) for row in rows]
-
-    gallery = np.array(vectors, dtype=float)
-    probe = np.array(probe_vector, dtype=float)
-
-    gallery_norms = np.linalg.norm(gallery, axis=1)
-    gallery_norms[gallery_norms == 0] = 1.0
-    probe_norm = np.linalg.norm(probe) or 1.0
-
-    similarities = (gallery / gallery_norms[:, None]) @ (probe / probe_norm)
-    order = np.argsort(-similarities)[:top_k]
-
-    return [
-        Match(
-            subject_model=rows[i].subject_model,
-            subject_id=rows[i].subject_id,
-            template_id=str(rows[i].id),
-            score=float(similarities[i]),
-        )
-        for i in order
-    ]
+    return Gallery(provider, modality, scope, exclude_subject).rank(vector=probe_vector, top_k=top_k)
 
 
 def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_subject):
@@ -718,22 +756,7 @@ def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_s
 
 
 def _identify_template(provider, modality, probe_template, top_k, scope, exclude_subject):
-    from . import crypto
-    from .apps import BiometricConfig
-
-    rows = _comparable_gallery(provider, modality, scope, exclude_subject, "template")
-    key = BiometricConfig.template_key
-
-    scored = []
-    for row in rows:
-        stored = crypto.decrypt_bytes(row.template, crypto.row_key(row.encrypted, key))
-        scored.append((provider.match(probe_template, stored), row))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-
-    return [
-        Match(subject_model=row.subject_model, subject_id=row.subject_id, template_id=str(row.id), score=score)
-        for score, row in scored[:top_k]
-    ]
+    return Gallery(provider, modality, scope, exclude_subject).rank(template=probe_template, top_k=top_k)
 
 
 def identify(modality, *, sample=None, vector=None, template=None, top_k=5,

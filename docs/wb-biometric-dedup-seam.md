@@ -271,10 +271,14 @@ Management command `biometric_purge`. Acts only when the policy has both fields 
 ### 3.5 Candidate source — `dedup_source.py`
 
 `BiometricCandidateSource(modality="face")`: `scan(since)` iterates active templates of the
-modality whose `date_updated`/id are past the watermark, runs `identify(top_k, exclude_subject)`
-for each, and yields a `Candidate(kind="biometric", score, evidence={"modality", "provider",
+modality whose `date_updated`/id are past the watermark, ranks each against the gallery with
+its own subject excluded (top 5), and yields a `Candidate(kind="biometric", score, evidence={"modality", "provider",
 "model_name", "template_a", "template_b"})` per match at or above `DEDUP_THRESHOLD[modality]`.
 Pairs are ordered with `order_pair`. `watermark()` returns the newest `(date_updated, id)` seen.
+On the numpy and template paths the scan reads and decrypts the gallery once
+(`services.Gallery`, the ranking `identify()` uses) and ranks every probe against it; a probe
+row found in the gallery reuses its decrypted value. On the pgvector path each probe runs
+`identify()`, which ranks in the database and decrypts nothing.
 
 ### 3.6 GraphQL — graphene 2, `schema.py` (existing fields kept)
 
