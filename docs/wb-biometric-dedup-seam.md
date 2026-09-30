@@ -436,7 +436,8 @@ discards its result, so the reviewer's `resolveTask` mutation still reports succ
 stays open and the refusal is in the server log. The approver therefore learns the refusal before
 submitting: the task form calls `duplicateCandidateResolveCheck` (§4.4) whenever the decision or the
 kept record changes, shows the translated refusal and disables the approve button while the check
-refuses.
+refuses. While the candidate is `OPEN`, the approve button also stays disabled until the form holds a
+decision it can send: one chosen, with the record to keep for a merge.
 
 ### 4.4 GraphQL — graphene 2 (existing fields kept)
 
