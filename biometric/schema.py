@@ -614,10 +614,22 @@ class BiometricAuditEventGQLType(DjangoObjectType):
         return _event_payload_for(self.action, self.payload, info)
 
 
+def _may_read_audit(info):
+    user = getattr(info.context, "user", None)
+    return bool(user is not None and user.has_perms(BiometricConfig.gql_biometric_audit_perms))
+
+
 class BiometricAlertGQLType(DjangoObjectType):
-    """An alert raised by an audit rule. The dedupe key is internal and not exposed."""
+    """
+    An alert raised by an audit rule. The dedupe key is internal and not exposed.
+    detail, subjectModel and subjectId are null unless the caller holds
+    gql_biometric_audit_perms: the triage mutations return this type to the
+    alert right alone.
+    """
 
     detail = graphene.JSONString()
+    subject_model = graphene.String()
+    subject_id = graphene.String()
     trigger_event_id = graphene.String()
 
     class Meta:
@@ -640,9 +652,17 @@ class BiometricAlertGQLType(DjangoObjectType):
     def get_queryset(cls, queryset, info):
         return _audit_queryset(queryset, info)
 
+    def resolve_subject_model(self, info):
+        return self.subject_model if _may_read_audit(info) else None
+
+    def resolve_subject_id(self, info):
+        return self.subject_id if _may_read_audit(info) else None
+
     def resolve_detail(self, info):
         from .audit_rules import IMPERSONATION_SUSPECTED
 
+        if not _may_read_audit(info):
+            return None
         detail = dict(self.detail) if isinstance(self.detail, dict) else {}
         if self.rule_kind == IMPERSONATION_SUSPECTED and not _may_identify(info):
             for key in _MATCHED_IDENTITY_KEYS:

@@ -1039,7 +1039,9 @@ grant them to no role.
   - Right: 174005.
 - `acknowledgeBiometricAlert(id: String!)` and `resolveBiometricAlert(id: String!, note: String)`
   take the alert's raw UUID and return the alert. An invalid transition is a GraphQL error.
-  Right: 174006.
+  Right: 174006. `detail`, `subjectModel` and `subjectId` are null for a caller without 174005;
+  `BiometricAlertGQLType` declares `subjectModel` and `subjectId` as nullable `String` for that
+  reason.
 - **Sorting.** `orderBy` on `biometricAuditEvents`, `biometricAlerts`, `biometricErasures`,
   `biometricVerificationRecords` and `biometricMultimodalDecisions` accepts only the columns listed
   for that connection in `schema.py` (`AUDIT_EVENT_ORDER_BY`, `ALERT_ORDER_BY`, `ERASURE_ORDER_BY`,
