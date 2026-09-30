@@ -39,6 +39,16 @@ def _device_template(device_vector, device_template):
     )
 
 
+IDENTIFY_DEFAULT_TOP_K = 5
+
+
+def _clamp_top_k(top_k):
+    """identifyBiometric's topK: 5 when omitted, otherwise clamped to 1..BIOMETRIC['MAX_TOP_K']."""
+    if top_k is None:
+        top_k = IDENTIFY_DEFAULT_TOP_K
+    return max(1, min(int(top_k), int(BiometricConfig.max_top_k)))
+
+
 def _require_perms(user, perms):
     if user.is_anonymous:
         raise PermissionDenied(_("unauthorized"))
@@ -919,7 +929,7 @@ class Query(graphene.ObjectType):
         BiometricMatchType,
         modality=graphene.String(required=True),
         sample=graphene.String(required=True, description="Base64-encoded probe sample."),
-        top_k=graphene.Int(required=False),
+        top_k=graphene.Int(required=False, description="Default 5, clamped to 1..BIOMETRIC['MAX_TOP_K'] (50)."),
         exclude_subject=graphene.String(required=False),
         description="Rank the gallery for one modality against a probe sample.",
     )
@@ -1070,14 +1080,14 @@ class Query(graphene.ObjectType):
         return qs
 
     @staticmethod
-    def resolve_identify_biometric(root, info, modality, sample, top_k=5, exclude_subject=None):
+    def resolve_identify_biometric(root, info, modality, sample, top_k=None, exclude_subject=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_identify_perms)
 
         from .services import identify
 
         matches = identify(
-            modality, sample=_decode_sample(sample), top_k=top_k or 5, exclude_subject=exclude_subject,
+            modality, sample=_decode_sample(sample), top_k=_clamp_top_k(top_k), exclude_subject=exclude_subject,
             actor=user.username,
         )
         return [

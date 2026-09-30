@@ -15,6 +15,7 @@ DEFAULT_CFG = {
     "vector_index": "numpy",  # "numpy" | "pgvector" (pgvector requires the biometric_pgvector app)
     "template_key": None,     # Fernet key; templates/vectors encrypted at rest when set
     "require_consent": False,
+    "max_top_k": 50,          # identifyBiometric clamps topK to 1..max_top_k
     "dedup_threshold": {"face": 0.62},  # similarity at/above which a candidate is emitted
     "fusion": {
         "weights": {"face": 1.0},
@@ -67,6 +68,7 @@ _SETTINGS_KEY_MAP = {
     "VECTOR_INDEX": "vector_index",
     "TEMPLATE_KEY": "template_key",
     "REQUIRE_CONSENT": "require_consent",
+    "MAX_TOP_K": "max_top_k",
     "DEDUP_THRESHOLD": "dedup_threshold",
     "FUSION": "fusion",
     "QUALITY": "quality",
@@ -95,6 +97,7 @@ class BiometricConfig(AppConfig):
     vector_index = "numpy"
     template_key = None
     require_consent = False
+    max_top_k = 50
     dedup_threshold = {"face": 0.62}
     fusion = {
         "weights": {"face": 1.0},

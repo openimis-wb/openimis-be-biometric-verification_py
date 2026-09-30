@@ -158,6 +158,7 @@ configuration, all optional with defaults:
 "VECTOR_INDEX": "numpy",          # "numpy" | "pgvector"  (pgvector only if importable)
 "TEMPLATE_KEY": None,             # Fernet key; templates and vectors are encrypted at rest when set
 "REQUIRE_CONSENT": False,
+"MAX_TOP_K": 50,                  # identifyBiometric clamps topK to 1..MAX_TOP_K
 "DEDUP_THRESHOLD": {"face": 0.62},  # similarity at/above which a candidate is emitted
 "FUSION": {"weights": {"face": 1.0}, "thresholds": {"accept": 0.7, "review": 0.6},
            "floors": {}, "floor_decision": "review"},
@@ -279,6 +280,8 @@ Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`; queries
 `gql_biometric_enrol_perms=["174001"]`, `gql_biometric_verify_perms=["174002"]`,
 `gql_biometric_identify_perms=["174003"]`, `gql_biometric_read_perms=["174004"]`, following
 the pattern of the module's existing rights. Samples travel base64.
+`identifyBiometric(topK)` ranks 5 when `topK` is omitted; a given value is clamped to
+`1..BIOMETRIC["MAX_TOP_K"]` (default 50), so zero or a negative value ranks one.
 `verifyBiometric` takes an optional `riskProfile: String` (§6.8); `BiometricVerifyResultType`
 and `BiometricVerificationRecordType` expose `riskProfile: String`. Later additions:
 `verifyBiometricMultimodal` (§6.11), `deviceVector` / `deviceTemplate` and
