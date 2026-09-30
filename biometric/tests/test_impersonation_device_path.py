@@ -12,7 +12,6 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from biometric import services
 from biometric.apps import BiometricConfig
 from biometric.audit_chain import ACTION_VERIFY
 from biometric.impersonation import (
@@ -31,6 +30,7 @@ from biometric.services import DevicePathRefusedError, verify, verify_multimodal
 from biometric.tests.test_audit_chain import restore_audit_settings_on_cleanup
 from biometric.tests.test_impersonation import VECTORS, _ImpersonationTestCase
 from biometric.tests.test_services import SUBJECT_MODEL
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 
 class TestDevicePathProbe(_ImpersonationTestCase):
@@ -168,7 +168,7 @@ def _info(user):
     return info
 
 
-class TestDevicePathOverGraphQL(_ImpersonationTestCase):
+class TestDevicePathOverGraphQL(SyntheticSubjectsMixin, _ImpersonationTestCase):
 
     @patch("biometric.services.verify")
     def test_device_vector_and_template_are_forwarded(self, mock_verify):

@@ -20,6 +20,7 @@ from biometric.schema import Mutation, Query, VerifyBiometricMultimodalMutation
 from biometric.services import _OUTCOME_RANK, verify_multimodal
 from biometric.tests.test_risk_profiles import ACCEPTED_PROFILES, BASE_FUSION, BASE_MODALITIES
 from biometric.tests.test_services import SUBJECT_MODEL, _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 FUSION = {
     "weights": {"face": 1.0, "fingerprint": 1.0},
@@ -218,7 +219,7 @@ mutation {
 """
 
 
-class TestMultimodalMutation(_MultimodalTestCase):
+class TestMultimodalMutation(SyntheticSubjectsMixin, _MultimodalTestCase):
 
     def _execute(self, risk_profile="\"\"", user=None):
         schema = graphene.Schema(query=Query, mutation=Mutation)

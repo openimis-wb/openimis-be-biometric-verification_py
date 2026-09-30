@@ -20,6 +20,7 @@ from biometric.apps import BiometricConfig
 from biometric.models import BiometricErasure, BiometricVerification
 from biometric.schema import Mutation, Query
 from biometric.tests.test_admin_schema import _User
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 READ_PERMS = ["174004"]
 AUDIT_PERMS = ["174005"]
@@ -95,7 +96,7 @@ SUSPECTED = {
 }
 
 
-class TestVerificationRecords(_RightsMixin, TestCase):
+class TestVerificationRecords(SyntheticSubjectsMixin, _RightsMixin, TestCase):
 
     def setUp(self):
         super().setUp()

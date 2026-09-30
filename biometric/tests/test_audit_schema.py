@@ -28,6 +28,7 @@ from biometric.audit_chain import (
 from biometric.models import BiometricAlert, BiometricAuditEvent, BiometricTemplate
 from biometric.schema import BiometricAlertGQLType, BiometricAuditEventGQLType, Mutation, Query
 from biometric.tests.test_audit_chain import AuditConfigMixin
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 SUBJECT_MODEL = "individual.Individual"
 T0 = datetime.datetime(2026, 9, 1, 12, 0, 0)
@@ -343,7 +344,7 @@ class TestIdentifyForwardsActor(SimpleTestCase):
         self.assertEqual(mock_identify.call_args.kwargs["actor"], "investigator")
 
 
-class TestTemplatesListEvent(AuditConfigMixin, TestCase):
+class TestTemplatesListEvent(SyntheticSubjectsMixin, AuditConfigMixin, TestCase):
 
     def setUp(self):
         super().setUp()

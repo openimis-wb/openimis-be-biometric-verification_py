@@ -21,6 +21,7 @@ from biometric.apps import BiometricConfig
 from biometric.providers.fake import FakeEmbeddingProvider
 from biometric.services import enrol, identify, templates_of, verify
 from biometric.tests.test_services import SUBJECT_MODEL, _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 
 class TestCryptoRaises(SimpleTestCase):
@@ -126,7 +127,7 @@ class TestReadPathsRaise(_EncryptedGalleryTestCase):
             list(BiometricCandidateSource("face").scan(None))
 
 
-class TestGraphQLError(_EncryptedGalleryTestCase):
+class TestGraphQLError(SyntheticSubjectsMixin, _EncryptedGalleryTestCase):
 
     def _execute(self, query):
         from biometric.schema import Mutation, Query

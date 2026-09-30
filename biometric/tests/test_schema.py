@@ -27,6 +27,7 @@ from biometric.schema import (
     VerifyBiometricMutation,
 )
 from biometric.tests.test_services import _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 
 def _make_info(user):
@@ -49,7 +50,7 @@ def _auth_user(username="tester", has_perms=True):
     return user
 
 
-class TestEnrolBiometricMutation(SimpleTestCase):
+class TestEnrolBiometricMutation(SyntheticSubjectsMixin, SimpleTestCase):
 
     def test_anonymous_raises_permission_denied(self):
         with self.assertRaises(PermissionDenied):
@@ -143,7 +144,7 @@ class TestEnrolBiometricMutation(SimpleTestCase):
         self.assertEqual(args[3], b"raw-bytes")
 
 
-class TestVerifyBiometricMutation(SimpleTestCase):
+class TestVerifyBiometricMutation(SyntheticSubjectsMixin, SimpleTestCase):
 
     def test_anonymous_raises_permission_denied(self):
         with self.assertRaises(PermissionDenied):
@@ -243,7 +244,7 @@ class TestVerifyBiometricMutation(SimpleTestCase):
             )
 
 
-class TestBiometricVerificationsQuery(SimpleTestCase):
+class TestBiometricVerificationsQuery(SyntheticSubjectsMixin, SimpleTestCase):
 
     @patch("biometric.schema.BiometricConfig")
     @patch("biometric.models.BiometricVerification")
@@ -264,7 +265,7 @@ class TestBiometricVerificationsQuery(SimpleTestCase):
         self.assertEqual(result[0].threshold, 70.0)
 
 
-class TestVerifyRiskProfileOverGraphQL(_MultimodalServiceTestCase):
+class TestVerifyRiskProfileOverGraphQL(SyntheticSubjectsMixin, _MultimodalServiceTestCase):
 
     QUERY = (
         'mutation { verifyBiometric(subjectId: "s1", modality: "voice_device", deviceScore: 60, '
@@ -288,7 +289,7 @@ class TestVerifyRiskProfileOverGraphQL(_MultimodalServiceTestCase):
         self.assertIn("Unknown risk profile 'nope'", str(result.errors[0]))
 
 
-class TestRecordBiometricConsentMutation(SimpleTestCase):
+class TestRecordBiometricConsentMutation(SyntheticSubjectsMixin, SimpleTestCase):
 
     def test_anonymous_raises_permission_denied(self):
         with self.assertRaises(PermissionDenied):
@@ -344,7 +345,7 @@ class TestIdentifyBiometricQuery(SimpleTestCase):
         self.assertEqual(kwargs["sample"], b"probe")
 
 
-class TestBiometricTemplatesQuery(SimpleTestCase):
+class TestBiometricTemplatesQuery(SyntheticSubjectsMixin, SimpleTestCase):
 
     def test_anonymous_raises_permission_denied(self):
         with self.assertRaises(PermissionDenied):
@@ -414,7 +415,7 @@ def _template_row(quality_verdict):
     return row
 
 
-class TestQualityVerdictField(SimpleTestCase):
+class TestQualityVerdictField(SyntheticSubjectsMixin, SimpleTestCase):
 
     @patch("biometric.schema.BiometricConfig")
     @patch("biometric.models.BiometricTemplate")
@@ -459,7 +460,7 @@ class TestQualityVerdictField(SimpleTestCase):
 
 
 @skipUnless(pillow_available(), "Pillow is not importable")
-class TestEnrolQualityRefusalOverGraphQL(_MultimodalServiceTestCase):
+class TestEnrolQualityRefusalOverGraphQL(SyntheticSubjectsMixin, _MultimodalServiceTestCase):
 
     QUERY = (
         'mutation { enrolBiometric(subjectId: "s1", modality: "face", sample: "%s") '
@@ -521,7 +522,7 @@ def _verify_only_user():
     return user
 
 
-class TestImpersonationOverGraphQL(SimpleTestCase):
+class TestImpersonationOverGraphQL(SyntheticSubjectsMixin, SimpleTestCase):
 
     @staticmethod
     def _cfg(mock_cfg):
@@ -645,7 +646,7 @@ class TestImpersonationOverGraphQL(SimpleTestCase):
         self.assertIsNone(result[0].impersonation)
 
 
-class TestImpersonationEvidenceFields(SimpleTestCase):
+class TestImpersonationEvidenceFields(SyntheticSubjectsMixin, SimpleTestCase):
     """Every key of the stored evidence reaches the GraphQL type."""
 
     @patch("biometric.schema.BiometricConfig")

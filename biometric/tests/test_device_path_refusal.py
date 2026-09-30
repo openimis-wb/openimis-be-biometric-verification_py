@@ -14,9 +14,10 @@ from biometric.models import BiometricMultimodalDecision, BiometricVerification
 from biometric.schema import Mutation, Query
 from biometric.services import DevicePathRefusedError, verify, verify_multimodal
 from biometric.tests.test_services import SUBJECT_MODEL, _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 
-class TestDevicePathRefusal(_MultimodalServiceTestCase):
+class TestDevicePathRefusal(SyntheticSubjectsMixin, _MultimodalServiceTestCase):
 
     def test_server_matched_modalities_refuse_a_device_score(self):
         for modality in ("face", "fingerprint"):

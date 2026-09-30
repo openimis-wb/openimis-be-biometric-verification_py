@@ -23,6 +23,7 @@ from biometric.tests.test_audit_chain import restore_audit_settings_on_cleanup
 from biometric.tests.test_impersonation import VECTORS, _ImpersonationTestCase
 from biometric.tests.test_multimodal_verify import FUSION, _legs, _MultimodalTestCase
 from biometric.tests.test_services import SUBJECT_MODEL
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 READ_PERMS = ["174004"]
 AUDIT_PERMS = ["174005"]
@@ -185,7 +186,7 @@ query {
 """
 
 
-class TestDecisionOverGraphQL(_DecisionTestCase):
+class TestDecisionOverGraphQL(SyntheticSubjectsMixin, _DecisionTestCase):
 
     def test_the_mutation_returns_the_decision_and_leg_ids(self):
         result = _execute(MUTATION, _User(perms=["174002"], username="agent"))
@@ -257,7 +258,7 @@ class TestDecisionOverGraphQL(_DecisionTestCase):
         self.assertEqual(allowed.data["node"]["outcome"], "accept")
 
 
-class TestNoOtherIdentityInTheDecision(_ImpersonationTestCase):
+class TestNoOtherIdentityInTheDecision(SyntheticSubjectsMixin, _ImpersonationTestCase):
     """A suspected leg names another subject on its own row and event; the decision never does."""
 
     def setUp(self):

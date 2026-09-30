@@ -294,6 +294,8 @@ Every mutation of the `biometric` app (`enrolBiometric`, `verifyBiometric`,
 (`core.schema._check_csrf_token`), as `OpenIMISMutation` does: outside dev mode and tests, and
 unless the User-Agent is in `USER_AGENT_CSRF_BYPASS`, the `X-CSRFToken` header must equal the
 session's `csrftoken`. The `biometric_verification` mutations are unchanged.
+The subject fields of these queries and mutations check the subject's existence and the caller's
+location scope (§6.15).
 `identifyBiometric(topK)` ranks 5 when `topK` is omitted; a given value is clamped to
 `1..BIOMETRIC["MAX_TOP_K"]` (default 50), so zero or a negative value ranks one.
 `verifyBiometric` takes an optional `riskProfile: String` (§6.8); `BiometricVerifyResultType`
@@ -1148,6 +1150,7 @@ Query `biometricMultimodalDecisions`, right `gql_biometric_read_perms` (174004, 
 - Arguments: `subjectModel`, `subjectId`, `outcome`, `riskProfile`, `createdAt_Gte`, `createdAt_Lte`,
   `orderBy`, `first`, `after`, `before`, `last`, `offset`.
 - The root `node` lookup of this type needs 174004 as well.
+- The subject and the rows are cut to the caller's location scope (§6.15).
 
 ### 6.12 Admin queries
 
@@ -1272,5 +1275,46 @@ records across subjects are read through a relay connection, right `gql_biometri
   `gql_biometric_identify_perms` (174003), as on `biometricVerifications`. The caller's `context`,
   the raw `impersonation_evidence` and the `impersonation_subject_*` columns are not fields.
 - The root `node` lookup of `BiometricVerificationGQLType` needs 174004 as well.
+- Rows are cut to the caller's location scope, and `biometricVerifications` refuses a subject
+  outside it (§6.15).
 
 `biometricMultimodalDecisions` (§6.11) reads the stored multimodal decisions under the same right.
+
+### 6.15 Subject existence and location scope
+
+`biometric/subjects.py` checks the subject a GraphQL caller names, and cuts the read connections to
+the subjects the caller may see.
+
+**Scoped model.** A subject model with a relation to `location.Location` and a classmethod
+`get_queryset(queryset, user)` is scoped by that classmethod, the one its own list applies:
+for `individual.Individual`, `Individual.get_queryset` (the user's districts, directly or through
+the individual's group). Any other subject model is only checked for existence. Superusers and
+IMIS admins (`is_superuser` / `is_imis_admin`) bypass the scope, as core does; with
+`ROW_SECURITY` off, `get_queryset` itself returns every row.
+
+**Single-subject fields.** `enrolBiometric`, `recordBiometricConsent` (174001),
+`verifyBiometric`, `verifyBiometricMultimodal` (174002), `biometricTemplates` and
+`biometricVerifications` (174004) run `check_subject` after the right check and before anything is
+read or written. It raises `SubjectRefusedError`, a GraphQL error with `extensions.code`:
+
+| Code | When |
+|---|---|
+| `BIOMETRIC_SUBJECT_MODEL_UNKNOWN` | `subjectModel` (or `BIOMETRIC["SUBJECT_MODEL"]`) is not an installed model |
+| `BIOMETRIC_SUBJECT_NOT_FOUND` | no row has that primary key (a malformed key included), or the row is outside the caller's scope |
+
+An out-of-scope subject reports `NOT_FOUND`, as core's lists show neither case. The services
+(`enrol()`, `verify()`, …) take an actor string and do not check the subject; the check belongs to
+the GraphQL caller.
+
+**Connections.** `biometricVerificationRecords` and `biometricMultimodalDecisions`, and the root
+`node` lookup of both types, go through `scope_rows` in their type's `get_queryset`: a row of a
+scoped model is kept when its `subject_id` is the text form of a primary key in the model's
+scoped queryset; a row of an unscoped model is kept; a row whose `subject_model` names no
+installed model is dropped for a caller without the bypass. Each resolve reads the distinct
+`subject_model` values of the table once.
+
+**Not scoped.** `identifyBiometric` and the 174003 identity fields (a 1:N search over the whole
+gallery), the audit surface under 174005 (`biometricAuditEvents`, `biometricAlerts`,
+`biometricErasures`, `biometricErasureFilterValues`, `biometricAuditChainStatus`), the alert
+triage under 174006 and the 174007 configuration queries.
+

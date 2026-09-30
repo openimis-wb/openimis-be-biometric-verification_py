@@ -53,6 +53,7 @@ from biometric.services import (
 from biometric.tests.test_audit_chain import restore_audit_settings_on_cleanup
 from biometric.tests.test_impersonation import VECTORS, _ImpersonationTestCase
 from biometric.tests.test_services import SUBJECT_MODEL, _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 AUDIT_ON = {"enabled": True, "rules": {}}
 
@@ -92,7 +93,7 @@ class _AuditServiceTestCase(_MultimodalServiceTestCase):
         BiometricConfig.audit = dict(AUDIT_ON)
 
 
-class TestEnrolEvent(_AuditServiceTestCase):
+class TestEnrolEvent(SyntheticSubjectsMixin, _AuditServiceTestCase):
 
     def test_records_template_enrol_with_superseded_ids(self):
         first = enrol(SUBJECT_MODEL, "s1", "face", b"photo-1", actor="agent")

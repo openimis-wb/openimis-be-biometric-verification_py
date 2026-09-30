@@ -31,6 +31,7 @@ from biometric.services import (
 )
 from biometric.tests.test_audit_chain import AuditConfigMixin
 from biometric.tests.test_services import SUBJECT_MODEL, _MultimodalServiceTestCase
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 
 def _png(pixels):
@@ -223,7 +224,7 @@ class TestVerifySkipsOtherPreprocessing(_PreprocessingTestCase):
         self.assertEqual(result.template_skip_reason, "")
 
 
-class TestVerifyAuditAndGraphQL(AuditConfigMixin, _PreprocessingTestCase):
+class TestVerifyAuditAndGraphQL(SyntheticSubjectsMixin, AuditConfigMixin, _PreprocessingTestCase):
 
     def test_the_verify_event_carries_the_reason(self):
         BiometricConfig.audit = {"enabled": True, "rules": {}}

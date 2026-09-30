@@ -12,6 +12,7 @@ from biometric.models import BiometricVerification
 from biometric.schema import OrderByRefusedError
 from biometric.tests.test_admin_schema import _User
 from biometric.tests.test_verification_records import _execute
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 
 ALL_PERMS = ["174003", "174004", "174005"]
 
@@ -40,9 +41,10 @@ CONNECTIONS = {
 }
 
 
-class TestOrderByAllowList(TestCase):
+class TestOrderByAllowList(SyntheticSubjectsMixin, TestCase):
 
     def setUp(self):
+        super().setUp()
         for name in ("gql_biometric_read_perms", "gql_biometric_audit_perms", "gql_biometric_identify_perms"):
             self.addCleanup(setattr, BiometricConfig, name, getattr(BiometricConfig, name))
         BiometricConfig.gql_biometric_read_perms = ["174004"]

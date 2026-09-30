@@ -110,6 +110,17 @@ def _require_perms(user, perms):
         raise PermissionDenied(_("unauthorized"))
 
 
+def _require_subject(user, subject_model, subject_id):
+    """
+    SubjectRefusedError unless the subject (subject_model defaulting to
+    BIOMETRIC['SUBJECT_MODEL']) exists and lies in the user's location scope
+    (subjects.py).
+    """
+    from .subjects import check_subject
+
+    check_subject(user, subject_model or BiometricConfig.subject_model, subject_id)
+
+
 # ---------------------------------------------------------------------------
 # Multimodal identity + deduplication seam (docs/wb-biometric-dedup-seam.md §3.6)
 # ---------------------------------------------------------------------------
@@ -390,6 +401,7 @@ class EnrolBiometricMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .services import enrol
 
@@ -451,6 +463,7 @@ class VerifyBiometricMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .services import verify
 
@@ -493,6 +506,7 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .services import verify_multimodal
 
@@ -539,6 +553,7 @@ class RecordBiometricConsentMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .models import BiometricConsent
 
@@ -911,11 +926,15 @@ ERASURE_FILTER_VALUES_LIMIT = 200
 
 def _read_queryset(queryset, info):
     """
-    The queryset when the caller holds gql_biometric_read_perms, the right of
-    biometricVerifications. Root node lookups go through get_queryset too.
+    The queryset, cut to the subjects in the caller's location scope
+    (subjects.scope_rows), when the caller holds gql_biometric_read_perms, the
+    right of biometricVerifications. Connection results and root node lookups
+    both go through get_queryset.
     """
+    from .subjects import scope_rows
+
     _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
-    return queryset
+    return scope_rows(queryset, info.context.user)
 
 
 class BiometricMultimodalDecisionGQLType(DjangoObjectType):
@@ -1192,6 +1211,7 @@ class Query(graphene.ObjectType):
     def resolve_biometric_templates(root, info, subject_id, subject_model=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_read_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .audit_chain import ACTION_TEMPLATE_LIST, audit_enabled, record_event
         from .models import BiometricTemplate
@@ -1220,6 +1240,7 @@ class Query(graphene.ObjectType):
     def resolve_biometric_verifications(root, info, subject_id, subject_model=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_read_perms)
+        _require_subject(user, subject_model, subject_id)
 
         from .models import BiometricVerification as BiometricVerificationModel
 
