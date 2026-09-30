@@ -26,6 +26,7 @@ from biometric.models import (
 )
 from biometric.risk_profiles import decision_criteria
 from biometric.schema import Mutation, Query
+from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 from biometric.tests.test_audit_chain import AuditConfigMixin
 
 CONFIG_PERMS = ["174007"]
@@ -271,7 +272,7 @@ class TestRetentionPolicy(_AdminConfigMixin, TestCase):
         self.assertEqual(services.current_retention_policy().template_retention_days, 30)
 
 
-class TestErasures(_AdminConfigMixin, TestCase):
+class TestErasures(SyntheticSubjectsMixin, _AdminConfigMixin, TestCase):
 
     def setUp(self):
         super().setUp()

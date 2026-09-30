@@ -73,13 +73,15 @@ def check_subject(user, subject_model, subject_id):
         raise not_found
 
 
-def scope_rows(queryset, user, *, keep_unattributed=False):
+def scope_rows(queryset, user, *, keep_unattributed=False, live_subjects=False):
     """
     Rows of a biometric table (subject_model, subject_id) whose subject the
     user may see. Rows of a location-scoped subject model are kept when their
     subject is in the model's scoped queryset; rows of an unscoped model are
     kept; rows naming no installed model are dropped. With keep_unattributed,
-    rows whose subject_id is empty name no subject and are kept.
+    rows whose subject_id is empty name no subject and are kept. With
+    live_subjects, a row is kept only when its subject row exists and, for a
+    model with is_deleted, is not soft-deleted, whether the model is scoped or not.
     """
     if bypasses_scope(user):
         return queryset
@@ -89,12 +91,22 @@ def scope_rows(queryset, user, *, keep_unattributed=False):
             model = resolve_subject_model(label)
         except SubjectRefusedError:
             continue
-        if not is_location_scoped(model):
+        if is_location_scoped(model):
+            subjects = model.get_queryset(None, user)
+        elif live_subjects:
+            subjects = model._default_manager.all()
+        else:
             visible |= Q(subject_model=label)
             continue
-        scoped_ids = model.get_queryset(None, user).annotate(_subject_id=Cast("pk", CharField())).values("_subject_id")
+        if live_subjects and _is_soft_deletable(model):
+            subjects = subjects.filter(is_deleted=False)
+        scoped_ids = subjects.annotate(_subject_id=Cast("pk", CharField())).values("_subject_id")
         visible |= Q(subject_model=label, subject_id__in=scoped_ids)
     return queryset.filter(visible)
+
+
+def _is_soft_deletable(model):
+    return any(field.name == "is_deleted" for field in model._meta.concrete_fields)
 
 
 def require_rows_in_scope(queryset, user, *, keep_unattributed=False):

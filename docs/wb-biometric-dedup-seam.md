@@ -1257,11 +1257,13 @@ the numeric `MODALITIES[m]["threshold"]` values and `BIOMETRIC["RISK_PROFILES"]`
 (JSON counts per modality), `reason`, `erasedBy`, `erasedAt`, newest `erasedAt` first. Arguments:
 `subjectModel`, `subjectId`, `reason`, `erasedBy`, `erasedAt_Gte`, `erasedAt_Lte`, `orderBy`,
 `first`, `after`, `before`, `last`, `offset`; page size capped by `RELAY_CONNECTION_MAX_LIMIT`.
+The connection and the node lookup are cut to the caller's scope as §6.15 describes.
 
 **Erasure filter values.** `biometricErasureFilterValues` (no arguments) returns
 `BiometricErasureFilterValuesType { erasedBy: [String!]!, subjectModel: [String!]! }`: the distinct
-`erased_by` and `subject_model` values of `BiometricErasure`, each sorted ascending and cut to the
-first `schema.ERASURE_FILTER_VALUES_LIMIT` (200) in that order. Distinct, sort and cut run in SQL.
+`erased_by` and `subject_model` values of the `BiometricErasure` rows the caller may see (§6.15),
+each sorted ascending and cut to the first `schema.ERASURE_FILTER_VALUES_LIMIT` (200) in that order.
+Distinct, sort and cut run in SQL.
 
 **Chain status.** `audit_chain.record_chain_check(actor=...)` runs `verify_chain()` and stores a
 `BiometricAuditChainCheck` row (`biometric_audit_chain_check`, migration 0003): `checked_at`,
@@ -1381,18 +1383,25 @@ An out-of-scope subject reports `NOT_FOUND`, as core's lists show neither case. 
 (`enrol()`, `verify()`, …) take an actor string and do not check the subject; the check belongs to
 the GraphQL caller.
 
-**Connections.** `biometricVerificationRecords`, `biometricMultimodalDecisions`, `biometricAlerts` and
-`biometricAuditEvents`, and the root `node` lookup of the four types, go through `scope_rows` in
-their type's `get_queryset`: a row of a
-scoped model is kept when its `subject_id` is the text form of a primary key in the model's
-scoped queryset; a row of an unscoped model is kept; a row whose `subject_model` names no
-installed model is dropped for a caller without the bypass. Each resolve reads the distinct
-`subject_model` values of the table once.
+**Connections.** `biometricVerificationRecords`, `biometricMultimodalDecisions`, `biometricAlerts`,
+`biometricAuditEvents` and `biometricErasures`, and the root `node` lookup of the five types, go
+through `scope_rows` in their type's `get_queryset`: a row of a scoped model is kept when its
+`subject_id` is the text form of a primary key in the model's scoped queryset; a row of an unscoped
+model is kept; a row whose `subject_model` names no installed model is dropped for a caller without
+the bypass. Each resolve reads the distinct `subject_model` values of the table once.
 
-`scope_rows(queryset, user, keep_unattributed=True)`, used for alerts and audit events, also keeps
-the rows whose `subject_id` is empty: an `identify` event or an `ACCESS_BURST` alert names no
-subject. A row is judged by its own `subject_model` and `subject_id` only; identities inside an
+`scope_rows(queryset, user, keep_unattributed=True)`, used for alerts, audit events and erasures,
+also keeps the rows whose `subject_id` is empty: an `identify` event or an `ACCESS_BURST` alert names
+no subject. A row is judged by its own `subject_model` and `subject_id` only; identities inside an
 event payload or an alert detail are governed by the 174003 stripping (§6.10).
+
+Erasures also pass `live_subjects=True`. A tombstone outlives the templates it records, not the
+subject row, so it is judged against that row like any other: the row must
+exist and, for a model with `is_deleted`, not be soft-deleted, and a location-scoped model's row
+must be in the caller's scope. The existence and soft-delete checks apply to unscoped models too.
+A tombstone whose subject is soft-deleted or missing is therefore hidden from a caller without the
+bypass; superusers and IMIS admins see every tombstone. `biometricErasureFilterValues` reads the
+same cut rows.
 
 **Alert triage.** `acknowledgeBiometricAlert` and `resolveBiometricAlert` (174006) run
 `require_rows_in_scope` on the alert after the right check and before the transition. An existing
@@ -1400,8 +1409,7 @@ alert outside the caller's scope raises `SubjectRefusedError` with `BIOMETRIC_SU
 changes nothing and records no event. An id that matches no alert keeps the error it had before.
 
 **Not scoped.** `identifyBiometric` and the 174003 identity fields (a 1:N search over the whole
-gallery), the rest of the audit surface under 174005 (`biometricErasures`,
-`biometricErasureFilterValues`), the audit chain verification (`verifyBiometricAuditChain`, the
+gallery), the audit chain verification (`verifyBiometricAuditChain`, the
 `biometric_audit_verify` command), its stored status (`biometricAuditChainStatus`) and the chain
 head (`biometricAuditChainHead`), which walk and report every event whoever asks, and the 174007
 configuration queries.

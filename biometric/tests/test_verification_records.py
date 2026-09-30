@@ -192,7 +192,7 @@ class TestVerificationRecords(SyntheticSubjectsMixin, _RightsMixin, TestCase):
 FILTER_VALUES_QUERY = "query { biometricErasureFilterValues { erasedBy subjectModel } }"
 
 
-class TestErasureFilterValues(_RightsMixin, TestCase):
+class TestErasureFilterValues(SyntheticSubjectsMixin, _RightsMixin, TestCase):
 
     def _erasure(self, subject_model, erased_by):
         BiometricErasure.objects.create(

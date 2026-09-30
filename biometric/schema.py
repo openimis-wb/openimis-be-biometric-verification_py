@@ -866,6 +866,18 @@ class BiometricRetentionPolicyType(graphene.ObjectType):
     purge_active_enabled = graphene.Boolean(required=True)
 
 
+def _erasure_queryset(queryset, info):
+    """
+    _audit_queryset, cut to the tombstones whose subject still exists, is not
+    soft-deleted and lies in the caller's location scope (subjects.scope_rows).
+    A tombstone naming no subject is kept.
+    """
+    from .subjects import scope_rows
+
+    queryset = _audit_queryset(queryset, info)
+    return scope_rows(queryset, info.context.user, keep_unattributed=True, live_subjects=True)
+
+
 class BiometricErasureGQLType(DjangoObjectType):
     """A tombstone left when a subject's templates were erased; counts per modality, no biometric material."""
 
@@ -887,7 +899,7 @@ class BiometricErasureGQLType(DjangoObjectType):
 
     @classmethod
     def get_queryset(cls, queryset, info):
-        return _audit_queryset(queryset, info)
+        return _erasure_queryset(queryset, info)
 
     def resolve_modalities(self, info):
         return [str(m) for m in self.modalities] if isinstance(self.modalities, list) else []
@@ -1058,15 +1070,13 @@ class BiometricVerificationGQLType(DjangoObjectType):
 
 
 class BiometricErasureFilterValuesType(graphene.ObjectType):
-    """Distinct values of the erasure filters, sorted, at most ERASURE_FILTER_VALUES_LIMIT each."""
+    """Distinct values of the visible erasures' filters, sorted, at most ERASURE_FILTER_VALUES_LIMIT each."""
     erased_by = graphene.List(graphene.NonNull(graphene.String), required=True)
     subject_model = graphene.List(graphene.NonNull(graphene.String), required=True)
 
 
-def _distinct_values(field):
-    return list(
-        BiometricErasure.objects.order_by(field).values_list(field, flat=True).distinct()[:ERASURE_FILTER_VALUES_LIMIT]
-    )
+def _distinct_values(queryset, field):
+    return list(queryset.order_by(field).values_list(field, flat=True).distinct()[:ERASURE_FILTER_VALUES_LIMIT])
 
 
 # ---------------------------------------------------------------------------
@@ -1208,9 +1218,9 @@ class Query(graphene.ObjectType):
 
     @staticmethod
     def resolve_biometric_erasure_filter_values(root, info):
-        _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        erasures = _erasure_queryset(BiometricErasure.objects.all(), info)
         return BiometricErasureFilterValuesType(
-            erased_by=_distinct_values("erased_by"), subject_model=_distinct_values("subject_model"),
+            erased_by=_distinct_values(erasures, "erased_by"), subject_model=_distinct_values(erasures, "subject_model"),
         )
 
     @staticmethod
