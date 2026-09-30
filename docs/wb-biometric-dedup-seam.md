@@ -176,6 +176,14 @@ configuration, all optional with defaults:
   app logs one warning at startup. Encryption/decryption lives in `crypto.py`; models never
   expose plaintext by accident — access goes through `services.templates_of()` which decrypts
   and writes an access log entry.
+  Every reader decrypts a row by its `encrypted` flag (`crypto.row_key`): `encrypted=False` is
+  read as stored; `encrypted=True` is decrypted with `TEMPLATE_KEY`. A row marked encrypted that
+  does not decrypt (wrong or rotated key, or no key set) raises `crypto.TemplateKeyError`, whose
+  text never quotes the stored value and whose GraphQL error carries
+  `extensions.code = "BIOMETRIC_TEMPLATE_KEY"`. `verify()` logs the template id at ERROR and
+  raises before writing its `BiometricVerification` row, so a key fault is an error, never
+  `verified=false`; `identify()`, `templates_of()`, the candidate scan and the
+  `biometric_pgvector` sync receiver raise the same error.
 - `quality` float null; `provider` char(64); `model_name` char(64); `metadata` JSON
   (scope keys such as `{"cuvee_id": …}` live here)
 - `validity_from` auto_now_add; `validity_to` null; `date_created`; `date_updated`
@@ -780,8 +788,9 @@ subject's score.
 
 **Failure.** Any exception inside the probe is recorded as status `failed`, `suspected` false,
 and `error` = `"<ExceptionClass>: impersonation probe failed"`. The exception message is never
-stored, returned or logged: it can quote stored ciphertext (`decrypt_vector` returns the raw
-value on a wrong key) or the probe vector (psycopg2 interpolates parameters into its error text).
+stored, returned or logged: it can quote a stored value or the probe vector (psycopg2
+interpolates parameters into its error text). A gallery row that does not decrypt records
+`TemplateKeyError: impersonation probe failed` (§3.3).
 `biometric.impersonation` logs a WARNING with the modality, that error and the stack frames only. `verify()` still returns and
 writes its row; the savepoint keeps a database error from aborting the caller's transaction. A
 modality on `DeviceReportedMatcher` listed here records `failed` on every server-path verify,

@@ -31,14 +31,14 @@ class TestVectorRoundTrip(SimpleTestCase):
         self.assertIsNone(crypto.encrypt_vector(None, key))
         self.assertIsNone(crypto.decrypt_vector(None, key))
 
-    def test_decrypt_with_wrong_key_falls_back_to_raw_value(self):
+    def test_decrypt_with_wrong_key_raises(self):
         from cryptography.fernet import Fernet
 
         key_a = Fernet.generate_key()
         key_b = Fernet.generate_key()
         encrypted = crypto.encrypt_vector([1.0], key_a)
-        # InvalidToken is swallowed; the raw (undecryptable) value is returned.
-        self.assertEqual(crypto.decrypt_vector(encrypted, key_b), encrypted)
+        with self.assertRaises(crypto.TemplateKeyError):
+            crypto.decrypt_vector(encrypted, key_b)
 
 
 class TestBytesRoundTrip(SimpleTestCase):

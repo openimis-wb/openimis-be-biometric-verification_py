@@ -28,8 +28,7 @@ def sync_one(instance):
         BiometricVectorIndex.objects.filter(template_id=instance.id).delete()
         return
 
-    key = BiometricConfig.template_key if instance.encrypted else None
-    vector = crypto.decrypt_vector(instance.vector, key)
+    vector = crypto.decrypt_vector(instance.vector, crypto.row_key(instance.encrypted, BiometricConfig.template_key))
     if not vector:
         BiometricVectorIndex.objects.filter(template_id=instance.id).delete()
         return

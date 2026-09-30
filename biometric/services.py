@@ -303,14 +303,17 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
             if not comparable_preprocessing(row, provider):
                 skipped += 1
                 continue
-            row_key = key if row.encrypted else None
             try:
+                row_key = crypto.row_key(row.encrypted, key)
                 if row.kind == "embedding":
                     stored = crypto.decrypt_vector(row.vector, row_key)
                     candidate = provider.similarity(extracted.vector, stored)
                 else:
                     stored = crypto.decrypt_bytes(row.template, row_key)
                     candidate = provider.match(extracted.template, stored)
+            except crypto.TemplateKeyError:
+                logger.error("verify(): template %s is marked encrypted and does not decrypt", row.id)
+                raise
             except Exception:
                 logger.debug("verify(): skipping incomparable template %s", row.id, exc_info=True)
                 continue
@@ -593,7 +596,7 @@ def _identify_numpy(provider, modality, probe_vector, top_k, scope, exclude_subj
         return []
 
     key = BiometricConfig.template_key
-    vectors = [crypto.decrypt_vector(row.vector, key if row.encrypted else None) for row in rows]
+    vectors = [crypto.decrypt_vector(row.vector, crypto.row_key(row.encrypted, key)) for row in rows]
 
     gallery = np.array(vectors, dtype=float)
     probe = np.array(probe_vector, dtype=float)
@@ -697,7 +700,7 @@ def _identify_template(provider, modality, probe_template, top_k, scope, exclude
 
     scored = []
     for row in rows:
-        stored = crypto.decrypt_bytes(row.template, key if row.encrypted else None)
+        stored = crypto.decrypt_bytes(row.template, crypto.row_key(row.encrypted, key))
         scored.append((provider.match(probe_template, stored), row))
     scored.sort(key=lambda pair: pair[0], reverse=True)
 
@@ -955,7 +958,7 @@ def templates_of(subject_model=None, subject_id=None, *, modality=None, actor, p
     rows = list(qs)
     results = []
     for row in rows:
-        row_key = key if row.encrypted else None
+        row_key = crypto.row_key(row.encrypted, key)
         results.append({
             "id": str(row.id),
             "modality": row.modality,

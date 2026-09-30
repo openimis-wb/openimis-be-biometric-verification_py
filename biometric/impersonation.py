@@ -122,11 +122,10 @@ def maybe_probe(subject_model, subject_id, modality, provider, extracted) -> Opt
         top_k = int(settings.get("top_k") or PROBE_DEFAULTS["top_k"])
         return _run(subject_model, subject_id, modality, provider, extracted, threshold, margin, top_k)
     except Exception as exc:
-        # An exception's message can quote stored ciphertext or the probe vector
-        # (a failed decrypt returns the raw stored value; psycopg2 interpolates
-        # parameters into its error text). Only the class name and the stack
-        # frames are logged and recorded, never the message or the traceback's
-        # final line.
+        # An exception's message can quote the probe vector or a stored value
+        # (psycopg2 interpolates parameters into its error text). Only the class
+        # name and the stack frames are logged and recorded, never the message
+        # or the traceback's final line.
         error = failure_error(exc)
         logger.warning(
             "Impersonation probe failed for modality %s: %s\n%s",

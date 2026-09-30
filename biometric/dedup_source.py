@@ -95,7 +95,7 @@ class BiometricCandidateSource(CandidateSource):
             probe_template = template.template
             if template.encrypted:
                 from . import crypto
-                key = BiometricConfig.template_key
+                key = crypto.row_key(True, BiometricConfig.template_key)
                 probe_vector = crypto.decrypt_vector(probe_vector, key)
                 probe_template = crypto.decrypt_bytes(probe_template, key)
 

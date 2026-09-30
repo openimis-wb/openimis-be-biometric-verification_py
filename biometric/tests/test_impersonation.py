@@ -448,9 +448,9 @@ class TestFailureRedaction(_ImpersonationTestCase):
             vector=ciphertext, encrypted=True, provider="preset_embedding", model_name="",
         )
         BiometricConfig.template_key = Fernet.generate_key().decode()
-        with self.assertRaises(ValueError) as raw:
+        with self.assertRaises(crypto.TemplateKeyError) as raw:
             services.identify("face", vector=VECTORS[b"bob-probe"], top_k=5)
-        self.assertIn(ciphertext, str(raw.exception))
+        self.assertNotIn(ciphertext, str(raw.exception))
         self._enable()
 
         with self.assertLogs("biometric.impersonation", level="DEBUG") as logs:
@@ -458,9 +458,9 @@ class TestFailureRedaction(_ImpersonationTestCase):
 
         row = self._row()
         self.assertEqual(row.impersonation_status, "failed")
-        self.assertEqual(row.impersonation_evidence["error"], "ValueError: impersonation probe failed")
+        self.assertEqual(row.impersonation_evidence["error"], "TemplateKeyError: impersonation probe failed")
         self.assertNotIn(ciphertext, json.dumps(row.impersonation_evidence))
-        self.assertEqual(self._gql(row).error, "ValueError: impersonation probe failed")
+        self.assertEqual(self._gql(row).error, "TemplateKeyError: impersonation probe failed")
         self._assert_logs_exclude(logs, ciphertext)
 
 
