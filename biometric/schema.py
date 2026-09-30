@@ -39,6 +39,53 @@ def _device_template(device_vector, device_template):
     )
 
 
+class OrderByRefusedError(ValueError):
+    """An orderBy entry names a column outside the connection's sortable list."""
+
+    def __init__(self, order):
+        # graphql-core copies .extensions onto the GraphQL error it reports.
+        self.extensions = {"code": "BIOMETRIC_ORDER_BY_REFUSED"}
+        super().__init__(f"orderBy '{order}' is not sortable here.")
+
+
+# Sortable columns per connection, as snake_case model fields. Columns a node
+# does not expose (impersonation_*, context, payload, detail, dedupe_key,
+# trigger_event) are never listed, so orderBy cannot probe them.
+VERIFICATION_ORDER_BY = frozenset({
+    "id", "subject_model", "subject_id", "modality", "score", "threshold", "verified", "origin", "fallback",
+    "device_id", "actor", "created_at", "risk_profile", "impersonation_skip_reason", "template_skip_reason",
+})
+MULTIMODAL_DECISION_ORDER_BY = frozenset({
+    "id", "subject_model", "subject_id", "outcome", "score", "risk_profile", "fallback", "device_id", "actor",
+    "created_at",
+})
+AUDIT_EVENT_ORDER_BY = frozenset({
+    "id", "sequence", "action", "actor", "subject_model", "subject_id", "modality", "created_at",
+})
+ALERT_ORDER_BY = frozenset({
+    "id", "rule_kind", "severity", "state", "title", "subject_model", "subject_id", "occurrences", "triggered_at",
+    "last_seen_at", "acknowledged_by", "acknowledged_at", "resolved_by", "resolved_at",
+})
+ERASURE_ORDER_BY = frozenset({"id", "subject_model", "subject_id", "reason", "erased_by", "erased_at"})
+
+
+def _check_order_by(kwargs, allowed):
+    """
+    OrderByRefusedError unless every orderBy entry names a column in allowed.
+    Each entry is normalised as OrderedDjangoFilterConnectionField.orderBy
+    normalises it before sorting, then its sign is dropped.
+    """
+    from graphene.utils.str_converters import to_snake_case
+
+    order = kwargs.get("orderBy")
+    if not order:
+        return
+    for entry in [order] if isinstance(order, str) else order:
+        cleaned = OrderedDjangoFilterConnectionField._filter_order_by(entry or "")
+        if to_snake_case(cleaned.lstrip("+-")) not in allowed:
+            raise OrderByRefusedError(entry)
+
+
 IDENTIFY_DEFAULT_TOP_K = 5
 
 
@@ -1026,6 +1073,7 @@ class Query(graphene.ObjectType):
     @staticmethod
     def resolve_biometric_erasures(root, info, **kwargs):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        _check_order_by(kwargs, ERASURE_ORDER_BY)
         return BiometricErasure.objects.order_by("-erased_at", "-id")
 
     @staticmethod
@@ -1039,6 +1087,7 @@ class Query(graphene.ObjectType):
     @staticmethod
     def resolve_biometric_verification_records(root, info, **kwargs):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
+        _check_order_by(kwargs, VERIFICATION_ORDER_BY)
 
         qs = BiometricVerification.objects.order_by("-created_at", "-id")
         if kwargs.get("suspected") is not None:
@@ -1055,16 +1104,19 @@ class Query(graphene.ObjectType):
     @staticmethod
     def resolve_biometric_multimodal_decisions(root, info, **kwargs):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_read_perms)
+        _check_order_by(kwargs, MULTIMODAL_DECISION_ORDER_BY)
         return BiometricMultimodalDecision.objects.order_by("-created_at", "-id")
 
     @staticmethod
     def resolve_biometric_audit_events(root, info, **kwargs):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        _check_order_by(kwargs, AUDIT_EVENT_ORDER_BY)
         return BiometricAuditEvent.objects.order_by("-sequence")
 
     @staticmethod
     def resolve_biometric_alerts(root, info, **kwargs):
         _require_perms(info.context.user, BiometricConfig.gql_biometric_audit_perms)
+        _check_order_by(kwargs, ALERT_ORDER_BY)
 
         qs = BiometricAlert.objects.order_by("-triggered_at", "-id")
         if kwargs.get("state"):

@@ -1040,6 +1040,15 @@ grant them to no role.
 - `acknowledgeBiometricAlert(id: String!)` and `resolveBiometricAlert(id: String!, note: String)`
   take the alert's raw UUID and return the alert. An invalid transition is a GraphQL error.
   Right: 174006.
+- **Sorting.** `orderBy` on `biometricAuditEvents`, `biometricAlerts`, `biometricErasures`,
+  `biometricVerificationRecords` and `biometricMultimodalDecisions` accepts only the columns listed
+  for that connection in `schema.py` (`AUDIT_EVENT_ORDER_BY`, `ALERT_ORDER_BY`, `ERASURE_ORDER_BY`,
+  `VERIFICATION_ORDER_BY`, `MULTIMODAL_DECISION_ORDER_BY`), each with an optional `-` or `+`.
+  Each entry is normalised as core's `OrderedDjangoFilterConnectionField` normalises it (non-word
+  characters dropped, camelCase to snake_case) before the check. Any other entry, `"?"` included,
+  is a GraphQL error with `extensions.code = "BIOMETRIC_ORDER_BY_REFUSED"`. Columns a node does
+  not expose (`impersonation_*`, `context`, `payload`, `detail`, `dedupe_key`, `trigger_event`) and
+  lookups into them are never sortable.
 - **Identity stripping.** Without `gql_biometric_identify_perms` (174003):
   - an `identify` event's `matches` lose `subject_model`, `subject_id` and `template_id`, keeping
     `score`;
