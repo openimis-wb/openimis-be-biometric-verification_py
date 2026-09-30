@@ -8,11 +8,21 @@ class BiometricPgvectorConfig(AppConfig):
     name = MODULE_NAME
     label = MODULE_NAME
 
+    # SET LOCAL hnsw.ef_search on the pgvector identify path; read in ready().
+    hnsw_ef_search = 200
+
     def ready(self):
         self._guard_plaintext_index()
+        self._load_settings()
         from . import receivers
 
         receivers.connect()
+
+    @staticmethod
+    def _load_settings():
+        from .config import hnsw_ef_search
+
+        BiometricPgvectorConfig.hnsw_ef_search = hnsw_ef_search()
 
     @staticmethod
     def _guard_plaintext_index():

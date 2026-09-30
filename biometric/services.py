@@ -708,7 +708,7 @@ def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_s
 
     from django.db import connection, transaction
 
-    from biometric_pgvector.config import hnsw_ef_search
+    from biometric_pgvector.apps import BiometricPgvectorConfig
 
     model_name = getattr(provider, "model_name", "")
     dim = len(probe_vector)
@@ -745,7 +745,7 @@ def _identify_pgvector(provider, modality, probe_vector, top_k, scope, exclude_s
     with transaction.atomic():
         with connection.cursor() as cursor:
             # hnsw.ef_search takes a plain literal, not a bind parameter.
-            cursor.execute(f"SET LOCAL hnsw.ef_search = {int(hnsw_ef_search())}")
+            cursor.execute(f"SET LOCAL hnsw.ef_search = {int(BiometricPgvectorConfig.hnsw_ef_search)}")
             cursor.execute(sql, [probe_literal, *params, probe_literal, top_k])
             rows = cursor.fetchall()
 

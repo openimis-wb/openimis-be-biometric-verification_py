@@ -472,8 +472,11 @@ where the Postgres server has the `vector` extension.
 - `biometric.services.identify` with `VECTOR_INDEX="pgvector"`: raise
   `ImproperlyConfigured` unless `biometric_pgvector` is installed; otherwise query the side
   table with the same cast expression (`ORDER BY (embedding::vector(N)) <=> %s::vector(N)
-  LIMIT k`), inside a transaction that sets `SET LOCAL hnsw.ef_search = <config, default
-  200>`, applying the `scope` filter through the template join and `exclude_subject`.
+  LIMIT k`), inside a transaction that sets `SET LOCAL hnsw.ef_search =
+  BiometricPgvectorConfig.hnsw_ef_search`, applying the `scope` filter through the template join
+  and `exclude_subject`. `BiometricPgvectorConfig.ready()` reads `HNSW_EF_SEARCH` (default 200)
+  once, from the `biometric` ModuleConfiguration row then `settings.BIOMETRIC`; a change takes
+  effect at the next start.
   Returns the same `Match` objects as the NumPy path, similarity = 1 − cosine distance.
 - Plaintext: the index stores vectors in clear — an ANN index cannot search encrypted
   vectors. When `TEMPLATE_KEY` is set, `biometric_pgvector` refuses to start

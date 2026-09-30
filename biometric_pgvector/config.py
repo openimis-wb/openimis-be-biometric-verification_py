@@ -28,4 +28,5 @@ def allow_plaintext_index():
 
 
 def hnsw_ef_search():
+    """Read once by BiometricPgvectorConfig.ready(); identify reads the stored value."""
     return int(_raw_biometric_cfg().get("hnsw_ef_search", 200))
