@@ -431,10 +431,12 @@ task's `user_updated`. The receiver runs inside `TaskService.complete_task`'s tr
 - a candidate that is no longer `OPEN` (resolved from the candidate page) needs no decision, and
   the task completes.
 
-On the `resolveTask` path, tasks_management's `on_task_resolve` calls `complete_task` and
-discards its result, so the reviewer's `resolveTask` mutation still reports success; the task
-stays open and the refusal is in the server log. The approver therefore learns the refusal before
-submitting: the task form calls `duplicateCandidateResolveCheck` (§4.4) whenever the decision or the
+On the `resolveTask` path, upstream tasks_management's `on_task_resolve` calls `complete_task`
+and discards its result, so the reviewer's `resolveTask` mutation reports success while the task
+stays open and the refusal is only in the server log. The openimis-wb tasks_management fork
+(`release/26.04-wb`) raises instead: the whole resolve rolls back, the approver's decision is not
+stored, and `resolveTask` is logged as failed with the refusal in `detail`. With either module, the
+approver learns the refusal before submitting: the task form calls `duplicateCandidateResolveCheck` (§4.4) whenever the decision or the
 kept record changes, shows the translated refusal and disables the approve button while the check
 refuses. While the candidate is `OPEN`, the approve button also stays disabled until the form holds a
 decision it can send: one chosen, with the record to keep for a merge.
