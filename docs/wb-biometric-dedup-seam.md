@@ -1396,8 +1396,8 @@ also keeps the rows whose `subject_id` is empty: an `identify` event or an `ACCE
 no subject. A row is judged by its own `subject_model` and `subject_id` only; identities inside an
 event payload or an alert detail are governed by the 174003 stripping (§6.10).
 
-Erasures also pass `live_subjects=True`. A tombstone outlives the templates it records, not the
-subject row, so it is judged against that row like any other: the row must
+Erasures also pass `live_subjects=True`. A tombstone outlives the templates it records; its subject
+row may still exist, be soft-deleted or be gone, and the tombstone is judged against it: the row must
 exist and, for a model with `is_deleted`, not be soft-deleted, and a location-scoped model's row
 must be in the caller's scope. The existence and soft-delete checks apply to unscoped models too.
 A tombstone whose subject is soft-deleted or missing is therefore hidden from a caller without the
